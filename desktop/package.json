@@ -1,0 +1,79 @@
+{
+  "name": "geoanalisys-desktop",
+  "productName": "GeoAnalisys",
+  "version": "1.0.11",
+  "private": true,
+  "description": "GeoAnalisys — programa desktop (cada usuário conecta ao seu próprio PostgreSQL)",
+  "author": "GeoAnalisys",
+  "main": "main.js",
+  "scripts": {
+    "prepare-app": "node scripts/prepare.js",
+    "start": "npm run prepare-app && electron .",
+    "dist": "node scripts/close-build-instances.js && npm run prepare-app && electron-builder --win"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.2.7",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.2.7",
+    "@nestjs/platform-express": "^11.2.7",
+    "@nestjs/serve-static": "^5.0.5",
+    "@nestjs/swagger": "^11.4.7",
+    "@nestjs/throttler": "^6.7.1",
+    "@prisma/client": "^6.19.3",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "exceljs": "^4.4.0",
+    "prisma": "^6.19.3",
+    "proj4": "^2.22.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "allowScripts": {
+    "prisma@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "@prisma/client@6.19.3": true,
+    "@scarf/scarf": false,
+    "electron-winstaller": false
+  },
+  "build": {
+    "appId": "com.geoanalisys.desktop",
+    "productName": "GeoAnalisys",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "server.js",
+      "preload.js",
+      "connect.html",
+      "connect.js",
+      "app/**/*",
+      "node_modules/**/*",
+      {
+        "from": "node_modules/.prisma",
+        "to": "node_modules/.prisma",
+        "filter": [
+          "**/*"
+        ]
+      },
+      "package.json"
+    ],
+    "asar": false,
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "GeoAnalisys"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------- dependências
+node_modules/
+
+# ---------------------------------------------------------------- builds
+dist/
+build/
+*.tsbuildinfo
+# Programa desktop: conteúdo montado pelo scripts/prepare.js e instaladores gerados
+desktop/app/
+desktop/dist/
+
+# ---------------------------------------------------------------- segredos
+# Senha do banco, token da API: nunca versionar.
+# Use backend/.env.example e frontend/.env.example como modelo.
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------- logs e testes
+*.log
+npm-debug.log*
+logs/
+coverage/
+
+# ---------------------------------------------------------------- sistema e editores
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+
+# ---------------------------------------------------------------- ferramentas locais
+.claude/settings.local.json
+*.tmp
+newVersion.md

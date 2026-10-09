@@ -1,0 +1,32 @@
+{
+  "name": "geoanalisys",
+  "version": "1.0.11",
+  "private": true,
+  "description": "GeoAnalisys — sistema GIS de pontos com coordenadas UTM (NestJS + Prisma + React + MapLibre)",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "prestart": "npm run build",
+    "start": "npm run start -w backend",
+    "db:push": "npm run db:push -w backend",
+    "test": "npm run test -w backend && npm run test -w frontend",
+    "lint": "npm run lint -w frontend",
+    "format": "prettier --write \"backend/src/**/*.ts\" \"frontend/src/**/*.{ts,tsx,css}\"",
+    "desktop": "npm --prefix desktop run start",
+    "desktop:dist": "npm --prefix desktop run dist"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "prettier": "^3.9.9"
+  },
+  "allowScripts": {
+    "prisma@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "@prisma/client@6.19.3": true,
+    "@scarf/scarf": false
+  }
+}

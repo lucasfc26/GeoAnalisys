@@ -1,0 +1,5 @@
+node_modules/
+# Montado por scripts/prepare.js a partir do backend e do frontend
+app/
+# Instaladores gerados pelo electron-builder
+dist/

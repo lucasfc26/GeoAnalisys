@@ -1,0 +1,96 @@
+// Tabelas internas do sistema. Ficam no schema definido em DATABASE_URL (?schema=gis_app),
+// separadas das tabelas de dados do usuário, que são lidas dinamicamente.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Fonte de dados: uma tabela do banco com colunas de coordenadas e o CRS que as interpreta.
+model DataSource {
+  id             String     @id @default(uuid())
+  name           String
+  database       String
+  schema         String
+  tableName      String
+  idColumn       String
+  xColumn        String
+  yColumn        String
+  /// Código do sistema de coordenadas (ex.: EPSG:31984) ou CUSTOM
+  coordinateSystem String
+  /// Definição proj4 quando coordinateSystem = CUSTOM
+  proj4          String?
+  labelColumn    String?
+  categoryColumn String?
+  /// Coluna PostGIS opcional mantida sincronizada com X/Y nas edições
+  geometryColumn String?
+  searchColumns  String[]   @default([])
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  auditLogs      AuditLog[]
+  exportTemplates ExportTemplate[]
+
+  @@map("data_source")
+}
+
+/// Modelo de exportação: quais colunas vão para o arquivo e em que ordem, por fonte de dados.
+model ExportTemplate {
+  id        String     @id @default(uuid())
+  sourceId  String     @map("source_id")
+  source    DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  name      String
+  /// Colunas na ordem do arquivo; "@lat" e "@lng" = latitude/longitude calculadas (WGS84)
+  columns   String[]   @default([])
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  @@unique([sourceId, name])
+  @@map("export_template")
+}
+
+model AuditLog {
+  id        BigInt      @id @default(autoincrement())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  sourceId  String?
+  source    DataSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  oldValue  Json?
+  newValue  Json?
+  createdAt DateTime    @default(now())
+
+  @@index([sourceId, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+/// Tabela de Alterações: uma linha por ponto adicionado, removido ou alterado (edições repetidas
+/// são mescladas: valores da primeira versão × valores atuais). Tabela gis_app.alteracoes
+/// (antes change_log — renomeada por prisma/pre-push.sql, mantendo as linhas).
+model ChangeLog {
+  id          BigInt   @id @default(autoincrement())
+  sourceId    String   @map("source_id")
+  /// Nome da fonte no momento da alteração (a fonte pode ser excluída depois)
+  sourceName  String   @map("source_name")
+  recordId    String   @map("record_id")
+  /// CREATE | UPDATE | DELETE
+  action      String
+  observation String?
+  /// Atributos alterados, na ordem das colunas da tabela
+  attributes  String[] @default([])
+  /// Valores da primeira versão (mesma ordem de `attributes`)
+  oldValues   Json?    @map("old_values")
+  /// Valores atuais (mesma ordem de `attributes`)
+  newValues   Json?    @map("new_values")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([sourceId, recordId])
+  @@index([updatedAt])
+  @@map("alteracoes")
+}

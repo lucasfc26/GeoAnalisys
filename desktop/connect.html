@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <title>GeoAnalisys — Conectar ao banco</title>
+    <style>
+      :root {
+        --accent: #0f766e;
+        --accent-dark: #115e59;
+        --line: #d7dde4;
+        --muted: #64748b;
+        --text: #0f172a;
+        --bg: #f4f6f8;
+        --err: #b91c1c;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 14px/1.4 'Segoe UI', system-ui, sans-serif;
+        color: var(--text);
+        background: var(--bg);
+      }
+      header {
+        background: #0f172a;
+        color: #fff;
+        padding: 18px 24px;
+      }
+      header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+      header p { margin: 4px 0 0; color: #94a3b8; font-size: 12.5px; }
+      main { padding: 16px 24px 20px; }
+      h2 {
+        margin: 0 0 8px;
+        font-size: 11.5px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .saved { margin-bottom: 16px; }
+      .saved ul { list-style: none; margin: 0; padding: 0; max-height: 116px; overflow-y: auto; }
+      .saved li {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        margin-bottom: 4px;
+      }
+      .saved li button.pick {
+        flex: 1;
+        text-align: left;
+        background: none;
+        border: 0;
+        padding: 6px 10px;
+        cursor: pointer;
+        font: inherit;
+        color: var(--text);
+      }
+      .saved li button.pick small { color: var(--muted); }
+      .saved li button.del { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 6px 10px; font-size: 15px; }
+      .saved li button.del:hover { color: var(--err); }
+      .empty { color: var(--muted); font-size: 12.5px; margin: 0; }
+      form { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+      .row { display: flex; gap: 10px; }
+      .row > label { flex: 1; }
+      label { display: block; font-size: 12.5px; color: #334155; margin-bottom: 10px; }
+      input[type='text'],
+      input[type='password'],
+      input[type='number'] {
+        display: block;
+        width: 100%;
+        margin-top: 3px;
+        height: 32px;
+        padding: 0 9px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font: inherit;
+      }
+      input:focus { outline: 2px solid #99f6e4; border-color: var(--accent); }
+      .check { display: flex; align-items: center; gap: 6px; margin: 2px 0 12px; }
+      .hint { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+      .actions { display: flex; gap: 8px; justify-content: flex-end; }
+      button.btn {
+        height: 34px;
+        padding: 0 16px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: #fff;
+        font: inherit;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.btn.primary:hover { background: var(--accent-dark); }
+      button.btn:disabled { opacity: 0.55; cursor: default; }
+      #status { min-height: 20px; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+      #status.error { color: var(--err); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>GeoAnalisys</h1>
+      <p>Conecte ao seu PostgreSQL e escolha o banco de dados</p>
+    </header>
+    <main>
+      <section class="saved">
+        <h2>Conexões salvas</h2>
+        <ul id="saved"></ul>
+        <p class="empty" id="saved-empty">Nenhuma conexão salva ainda.</p>
+      </section>
+
+      <form id="form" autocomplete="off">
+        <div class="row">
+          <label>Servidor <input type="text" id="host" value="localhost" required /></label>
+          <label style="flex: 0 0 110px">Porta <input type="number" id="port" value="5432" min="1" max="65535" required /></label>
+        </div>
+        <div class="row">
+          <label>Usuário <input type="text" id="user" value="postgres" required /></label>
+          <label>Senha <input type="password" id="password" /></label>
+        </div>
+        <div class="actions" style="margin-bottom: 12px">
+          <button type="button" class="btn" id="list">Conectar e listar bancos</button>
+        </div>
+        <label
+          >Banco de dados
+          <input type="text" id="database" list="databases" placeholder="Conecte para listar, ou digite o nome" required />
+          <datalist id="databases"></datalist>
+        </label>
+        <label class="check"><input type="checkbox" id="savePassword" /> Lembrar a senha neste computador</label>
+        <div class="actions">
+          <button type="submit" class="btn primary" id="open">Abrir</button>
+        </div>
+        <div id="status"></div>
+      </form>
+    </main>
+    <script src="connect.js"></script>
+  </body>
+</html>
