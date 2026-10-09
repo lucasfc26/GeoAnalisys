@@ -1,15 +1,17 @@
 {
   "name": "geoanalisys-desktop",
   "productName": "GeoAnalisys",
-  "version": "1.0.11",
+  "version": "1.0.13",
   "private": true,
   "description": "GeoAnalisys — programa desktop (cada usuário conecta ao seu próprio PostgreSQL)",
   "author": "GeoAnalisys",
+  "repository": "github:lucasfc26/GeoAnalisys",
   "main": "main.js",
   "scripts": {
     "prepare-app": "node scripts/prepare.js",
     "start": "npm run prepare-app && electron .",
-    "dist": "node scripts/close-build-instances.js && npm run prepare-app && electron-builder --win"
+    "dist": "node scripts/close-build-instances.js && npm run prepare-app && electron-builder --win --publish never",
+    "release": "node --use-system-ca scripts/publish-release.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.2.7",
@@ -51,6 +53,9 @@
       "preload.js",
       "connect.html",
       "connect.js",
+      "updater.js",
+      "updater.html",
+      "assets/**/*",
       "app/**/*",
       "node_modules/**/*",
       {
@@ -65,15 +70,19 @@
     "asar": false,
     "win": {
       "target": [
-        "nsis"
-      ]
+        "nsis",
+        "zip"
+      ],
+      "artifactName": "${productName}-${version}-win.${ext}",
+      "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "GeoAnalisys"
+      "shortcutName": "GeoAnalisys",
+      "artifactName": "${productName} Setup ${version}.${ext}"
     }
   }
 }

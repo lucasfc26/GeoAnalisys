@@ -10,6 +10,17 @@ PostgreSQL**: ao abrir, informa servidor, porta, usuário e senha, escolhe o ban
 As conexões ficam salvas por usuário do Windows; a senha só é guardada se marcado "Lembrar a senha"
 (criptografada pelo Windows).
 
+## Projetos
+
+Menu **Arquivo › Novo Projeto / Abrir Projeto / Projetos Recentes / Salvar Projeto** (Ctrl+N, Ctrl+O,
+Ctrl+S). Cada projeto é um arquivo `<nome>.proj` (JSON) com camadas, filtros, simbologia e rótulos,
+limites (com as geometrias), mapas de fundo, configurações das janelas e a posição do mapa. O projeto
+aberto é salvo automaticamente a cada alteração e reaberto ao iniciar o programa.
+
+No banco, cada projeto fica em `gis_app.projetos` (id, nome, criação e atualização) e a Tabela de
+Alterações (`gis_app.alteracoes.project_id`) é separada por projeto: a janela mostra e limpa só as
+alterações do projeto aberto. Alterações feitas sem projeto aberto ficam com `project_id` nulo.
+
 ## Requisitos em cada computador
 
 - PostgreSQL instalado (PostGIS opcional), com as tabelas de dados no banco escolhido.
@@ -34,3 +45,26 @@ programa instalado no computador não é fechado.
 O instalador não é assinado digitalmente: o Windows (SmartScreen) mostra um aviso na primeira
 execução ("Mais informações › Executar assim mesmo"). Para distribuir sem o aviso é preciso um
 certificado de assinatura de código.
+
+## Atualização automática
+
+Ao abrir, o programa (instalado ou a pasta `win-unpacked`) lê o
+[`latest.json`](../latest.json) do repositório público. Se a versão for maior que a dele:
+
+1. baixa `GeoAnalisys-<versão>-win.zip` do Release `v<versão>` no GitHub e extrai ao lado da pasta
+   do programa (`<pasta>.update`), mostrando o progresso numa janela;
+2. abre o exe novo dessa pasta, que espera o antigo fechar, copia os arquivos por cima da pasta
+   antiga e reabre o programa já atualizado (a pasta `.update` é apagada em seguida).
+
+Não precisa de admin: só de permissão de escrita na pasta do programa. Sem internet, com o GitHub
+bloqueado ou sem o release publicado, o programa abre normalmente na versão atual. Falhas ficam em
+`%APPDATA%\GeoAnalisys\atualizacao.log`. Para desativar: variável `GEOANALISYS_NO_UPDATE=1`.
+
+### Publicar uma versão
+
+1. Suba a versão em `package.json`, `desktop/package.json` e `latest.json`.
+2. `npm run desktop:dist` — gera também `desktop/dist/GeoAnalisys-<versão>-win.zip`.
+3. `npm run desktop:release` com `GH_TOKEN` definido (token do GitHub com *Contents: Read and write*
+   no repositório) — cria o Release `v<versão>` e envia o zip. Também dá para criar o release pelo
+   site do GitHub e anexar o zip com esse nome.
+4. Só então faça commit/push do `latest.json`: é ele que dispara a atualização nos computadores.

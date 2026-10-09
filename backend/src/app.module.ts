@@ -15,6 +15,7 @@ import { HealthModule } from './modules/health/health.controller';
 import { LayersModule } from './modules/layers/layers.module';
 import { MapsModule } from './modules/maps/maps.module';
 import { PointsModule } from './modules/points/points.module';
+import { ProjectsModule } from './modules/projects/projects.module';
 import { TablesModule } from './modules/tables/tables.module';
 import { PrismaModule } from './prisma/prisma.module';
 
@@ -38,6 +39,7 @@ const staticModules: DynamicModule[] = existsSync(join(FRONTEND_DIST, 'index.htm
     PointsModule,
     ExportModule,
     LayersModule,
+    ProjectsModule,
     HealthModule,
     ...staticModules,
   ],

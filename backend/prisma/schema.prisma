@@ -70,10 +70,12 @@ model AuditLog {
 }
 
 /// Tabela de Alterações: uma linha por ponto adicionado, removido ou alterado (edições repetidas
-/// são mescladas: valores da primeira versão × valores atuais). Tabela gis_app.alteracoes
+/// são mescladas: valores da primeira versão × valores atuais) em cada projeto. Tabela gis_app.alteracoes
 /// (antes change_log — renomeada por prisma/pre-push.sql, mantendo as linhas).
 model ChangeLog {
   id          BigInt   @id @default(autoincrement())
+  /// Projeto em que a alteração foi feita (gis_app.projetos.id); null = sem projeto aberto
+  projectId   String?  @map("project_id")
   sourceId    String   @map("source_id")
   /// Nome da fonte no momento da alteração (a fonte pode ser excluída depois)
   sourceName  String   @map("source_name")
@@ -90,7 +92,18 @@ model ChangeLog {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
 
-  @@unique([sourceId, recordId])
+  @@unique([projectId, sourceId, recordId])
   @@index([updatedAt])
   @@map("alteracoes")
+}
+
+/// Projeto do programa desktop (arquivo <nome>.proj com camadas, limites, mapas e configurações).
+/// O arquivo guarda o mesmo id; a Tabela de Alterações é separada por projeto.
+model Project {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("projetos")
 }

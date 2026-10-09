@@ -65,6 +65,8 @@ function InitialFit() {
     const id = sources.data.some((s) => s.id === sourceId) ? sourceId! : sources.data[0].id;
     // Também garante que a camada ativa esteja no mapa.
     setSource(id);
+    // Projeto aberto com a posição do mapa salva: fica nela.
+    if (useAppStore.getState().focus) return;
     pointsService
       .extent(id, useAppStore.getState().filters)
       .then((ext) => ext.bounds && focusMap({ bounds: ext.bounds }))

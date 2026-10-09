@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { projectMiddleware } from './common/project-context';
 
 // BigInt (ex.: id do AuditLog) serializado como string no JSON.
 (BigInt.prototype as unknown as { toJSON: () => string }).toJSON = function (this: bigint) {
@@ -21,6 +22,8 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
   // Seleções e exportações podem enviar muitos IDs.
   app.useBodyParser('json', { limit: '25mb' });
+  // Projeto aberto (x-project-id): a Tabela de Alterações é separada por projeto.
+  app.use(projectMiddleware);
   app.enableCors({
     origin: (process.env.CORS_ORIGIN ?? 'http://localhost:5173').split(',').map((s) => s.trim()),
     exposedHeaders: ['Content-Disposition'],

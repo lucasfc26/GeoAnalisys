@@ -1,5 +1,7 @@
 /** Cliente HTTP da API (mesma origem: /api — proxy do Vite em dev, backend em produção). */
 
+import { useProjectStore } from '@/stores/projectStore';
+
 export const API_BASE = '/api';
 const TIMEOUT_MS = 60_000;
 
@@ -19,6 +21,9 @@ export class ApiError extends Error {
 export function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'x-user-id': import.meta.env.VITE_USER_ID || 'local' };
   if (import.meta.env.VITE_API_TOKEN) h['x-api-key'] = import.meta.env.VITE_API_TOKEN;
+  // Projeto aberto: a Tabela de Alterações é separada por projeto.
+  const project = useProjectStore.getState().project;
+  if (project) h['x-project-id'] = project.id;
   return h;
 }
 
@@ -103,6 +108,8 @@ export const api = {
     request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) }, signal),
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body ?? {}) }),
+  put: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: 'PUT', body: JSON.stringify(body ?? {}) }),
   delete: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'DELETE', ...(body ? { body: JSON.stringify(body) } : {}) }),
 };

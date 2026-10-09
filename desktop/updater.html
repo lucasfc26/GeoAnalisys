@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
+    <title>GeoAnalisys — Atualizando</title>
+    <style>
+      :root {
+        --accent: #0f766e;
+        --line: #d7dde4;
+        --muted: #64748b;
+        --text: #0f172a;
+        --bg: #f4f6f8;
+        --err: #b91c1c;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; font: 14px/1.4 'Segoe UI', system-ui, sans-serif; color: var(--text); background: var(--bg); }
+      header { background: #0f172a; color: #fff; padding: 16px 24px; }
+      header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+      header .logo { width: 44px; height: 44px; border-radius: 10px; flex: none; box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.45); }
+      header.brand { display: flex; align-items: center; gap: 14px; }
+      header p { margin: 3px 0 0; color: #94a3b8; font-size: 12.5px; }
+      main { padding: 18px 24px; }
+      #msg { margin: 0 0 10px; }
+      .bar { height: 10px; background: #e2e8f0; border-radius: 5px; overflow: hidden; }
+      .bar div { height: 100%; width: 0; background: var(--accent); transition: width 0.15s; }
+      .bar.indeterminate div { width: 30%; animation: slide 1.2s ease-in-out infinite; }
+      @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+      #detail { margin: 8px 0 0; color: var(--muted); font-size: 12.5px; min-height: 18px; }
+      #error { color: var(--err); white-space: pre-wrap; font-size: 13px; margin: 0 0 12px; }
+      button { height: 32px; padding: 0 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <header class="brand">
+      <img class="logo" src="assets/logo.png" alt="" />
+      <div>
+        <h1 id="title">Atualizando o GeoAnalisys</h1>
+        <p>Não feche esta janela. O programa abre sozinho ao terminar.</p>
+      </div>
+    </header>
+    <main>
+      <div id="progress">
+        <p id="msg">Preparando…</p>
+        <div class="bar indeterminate" id="bar"><div></div></div>
+        <p id="detail"></p>
+      </div>
+      <div id="failed" hidden>
+        <p id="error"></p>
+        <button id="continue">Continuar</button>
+      </div>
+    </main>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const mb = (n) => (n / 1048576).toFixed(0) + ' MB';
+      const labels = {
+        download: 'Baixando a nova versão…',
+        extract: 'Extraindo arquivos…',
+        install: 'Instalando…',
+        done: 'Pronto! Abrindo o GeoAnalisys…',
+      };
+      $('continue').onclick = () => window.geoanalisys.continueUpdate();
+      window.geoanalisys.onUpdate((u) => {
+        $('title').textContent = `Atualizando o GeoAnalisys para a versão ${u.version}`;
+        if (u.step === 'error') {
+          $('progress').hidden = true;
+          $('failed').hidden = false;
+          $('error').textContent = u.error;
+          return;
+        }
+        $('msg').textContent = labels[u.step];
+        const pct = u.step === 'done' ? 100 : u.total ? Math.min(100, (100 * u.done) / u.total) : null;
+        $('bar').classList.toggle('indeterminate', pct === null);
+        $('bar').firstElementChild.style.width = pct === null ? '' : pct.toFixed(1) + '%';
+        $('detail').textContent =
+          u.step === 'download' && u.total
+            ? `${mb(u.done)} de ${mb(u.total)}`
+            : u.total
+              ? `${u.done} de ${u.total} arquivos`
+              : '';
+      });
+    </script>
+  </body>
+</html>

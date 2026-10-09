@@ -4,15 +4,29 @@
  * Ao abrir, mostra a tela de conexão (servidor, porta, usuário, senha e banco, como no QGIS). Ao
  * escolher o banco: cria/atualiza as tabelas internas (schema gis_app) nesse banco, sobe o servidor
  * do sistema só para esta máquina (127.0.0.1) e abre o sistema numa janela própria.
+ *
+ * Projetos (Arquivo > Novo/Abrir/Recentes): arquivos <nome>.proj com camadas, limites, mapas e
+ * configurações. O sistema (janela principal) monta e aplica o conteúdo; aqui ficam os diálogos de
+ * arquivo, a leitura/gravação no disco e a lista de recentes.
  */
 const { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, shell } = require('electron');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { friendlyError, listDatabases, startSystem } = require('./server');
+const updater = require('./updater');
+
+const ICON = path.join(__dirname, 'assets', 'icon.ico');
+
+// Exe novo aplicando uma atualização: usa uma pasta de dados própria para não disputar com o programa.
+const applyingUpdate = updater.isApplyMode();
+if (applyingUpdate) app.setPath('userData', path.join(app.getPath('temp'), 'GeoAnalisys-updater'));
 
 let connectWin = null;
 let mainWin = null;
 let started = false;
+/** Título da janela principal sem o projeto: "GeoAnalisys — banco (usuário@servidor)" */
+let mainTitle = 'GeoAnalisys';
 
 // ------------------------------------------------------------------ nome antigo (Censo GIS)
 
@@ -29,7 +43,7 @@ function migrateOldUserData() {
     /* sem migração: começa com a pasta nova vazia */
   }
 }
-migrateOldUserData();
+if (!applyingUpdate) migrateOldUserData();
 
 // ------------------------------------------------------------------ conexões salvas
 
@@ -64,10 +78,165 @@ function decrypt(b64) {
 
 const keyOf = (c) => `${c.user}@${c.host}:${c.port}/${c.database}`;
 
+// ------------------------------------------------------------------ projetos (.proj)
+
+const PROJECT_EXT = 'proj';
+const MAX_RECENT = 10;
+const projectsFile = () => path.join(app.getPath('userData'), 'projetos.json');
+
+/** { recent: caminhos (mais recente primeiro), last: projeto aberto por último (reabre ao iniciar) } */
+function readProjects() {
+  try {
+    const s = JSON.parse(fs.readFileSync(projectsFile(), 'utf8'));
+    return { recent: Array.isArray(s.recent) ? s.recent : [], last: s.last ?? null };
+  } catch {
+    return { recent: [], last: null };
+  }
+}
+
+function writeProjects(s) {
+  fs.mkdirSync(path.dirname(projectsFile()), { recursive: true });
+  fs.writeFileSync(projectsFile(), JSON.stringify(s, null, 2));
+}
+
+/**
+ * Pasta padrão dos projetos: "projects" ao lado do GeoAnalisys.exe (dentro do win-unpacked ou da pasta
+ * instalada; a atualização automática nunca apaga essa pasta). Rodando em desenvolvimento ou sem
+ * permissão de escrita ali (instalado em Program Files), usa Documentos.
+ */
+function projectsDir() {
+  if (app.isPackaged) {
+    const dir = path.join(path.dirname(process.execPath), 'projects');
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      // Teste real de escrita: no Windows o accessSync(W_OK) não confere as permissões da pasta.
+      const probe = path.join(dir, `.geo-write-test-${process.pid}`);
+      fs.writeFileSync(probe, '');
+      fs.rmSync(probe);
+      return dir;
+    } catch {
+      /* sem permissão: Documentos */
+    }
+  }
+  return app.getPath('documents');
+}
+
+const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+const projectName = (file) => path.basename(file, path.extname(file));
+const isProjectFile = (file) => typeof file === 'string' && path.extname(file).toLowerCase() === `.${PROJECT_EXT}`;
+
+function addRecent(file) {
+  const s = readProjects();
+  s.recent = [file, ...s.recent.filter((f) => !samePath(f, file))].slice(0, MAX_RECENT);
+  s.last = file;
+  writeProjects(s);
+  buildMenu();
+}
+
+function removeRecent(file) {
+  const s = readProjects();
+  s.recent = s.recent.filter((f) => !samePath(f, file));
+  if (s.last && samePath(s.last, file)) s.last = null;
+  writeProjects(s);
+  buildMenu();
+}
+
+function readProjectFile(file) {
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (data?.format !== 'geoanalisys-project' || typeof data.id !== 'string') {
+    throw new Error('O arquivo não é um projeto do GeoAnalisys.');
+  }
+  return data;
+}
+
+/** Grava via arquivo temporário: uma falha no meio não corrompe o projeto. */
+function writeProjectFile(file, data) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data));
+  fs.renameSync(tmp, file);
+}
+
+/** Pede ao sistema para trocar de projeto (ele salva o atual antes). */
+function openProject(file) {
+  if (!mainWin) return;
+  let data;
+  try {
+    data = readProjectFile(file);
+  } catch (err) {
+    const missing = err?.code === 'ENOENT';
+    dialog.showErrorBox(
+      'Abrir projeto',
+      missing ? `Arquivo não encontrado:\n${file}` : `Não foi possível abrir ${path.basename(file)}:\n${err?.message ?? err}`,
+    );
+    if (missing) removeRecent(file);
+    return;
+  }
+  mainWin.webContents.send('project:open', { path: file, name: projectName(file), data });
+}
+
+async function newProject() {
+  if (!mainWin) return;
+  const r = await dialog.showSaveDialog(mainWin, {
+    title: 'Novo projeto',
+    defaultPath: path.join(projectsDir(), `Novo projeto.${PROJECT_EXT}`),
+    buttonLabel: 'Criar projeto',
+    filters: [{ name: 'Projeto GeoAnalisys', extensions: [PROJECT_EXT] }],
+  });
+  if (r.canceled || !r.filePath) return;
+  const file = isProjectFile(r.filePath) ? r.filePath : `${r.filePath}.${PROJECT_EXT}`;
+  const { response } = await dialog.showMessageBox(mainWin, {
+    type: 'question',
+    title: 'Novo projeto',
+    message: `Criar o projeto "${projectName(file)}"`,
+    detail: 'Começar em branco ou levar as camadas, limites e configurações abertas agora?',
+    buttons: ['Em branco', 'Copiar configuração atual', 'Cancelar'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  if (response === 2) return;
+  mainWin.webContents.send('project:new', {
+    path: file,
+    name: projectName(file),
+    id: crypto.randomUUID(),
+    copy: response === 1,
+  });
+}
+
+async function openProjectDialog() {
+  if (!mainWin) return;
+  const r = await dialog.showOpenDialog(mainWin, {
+    title: 'Abrir projeto',
+    defaultPath: projectsDir(),
+    filters: [{ name: 'Projeto GeoAnalisys', extensions: [PROJECT_EXT] }],
+    properties: ['openFile'],
+  });
+  if (!r.canceled && r.filePaths[0]) openProject(r.filePaths[0]);
+}
+
+/**
+ * Antes de fechar/trocar de banco, o sistema grava o projeto aberto (o salvamento automático tem
+ * alguns segundos de atraso). Sem resposta em 5 s, segue mesmo assim.
+ */
+function flushProject() {
+  if (!mainWin) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, 5000);
+    function done() {
+      clearTimeout(timer);
+      ipcMain.removeListener('project:flushed', done);
+      resolve();
+    }
+    ipcMain.once('project:flushed', done);
+    mainWin.webContents.send('project:flush');
+  });
+}
+
 // ------------------------------------------------------------------ janelas
 
 function openConnectWindow() {
   connectWin = new BrowserWindow({
+    icon: ICON,
     width: 560,
     height: 700,
     resizable: false,
@@ -83,13 +252,16 @@ function openConnectWindow() {
 }
 
 function openMainWindow(origin, c) {
+  mainTitle = `GeoAnalisys — ${c.database} (${c.user}@${c.host})`;
   mainWin = new BrowserWindow({
+    icon: ICON,
     width: 1440,
     height: 900,
     show: false,
-    title: `GeoAnalisys — ${c.database} (${c.user}@${c.host})`,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
+    title: mainTitle,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
+  buildMenu();
   mainWin.maximize();
   mainWin.once('ready-to-show', () => mainWin.show());
   // O título do sistema não substitui o do programa (mostra o banco em uso).
@@ -106,6 +278,14 @@ function openMainWindow(origin, c) {
     }
   });
   mainWin.loadURL(origin);
+  // Grava o projeto aberto antes de fechar.
+  let closing = false;
+  mainWin.on('close', (e) => {
+    if (closing) return;
+    e.preventDefault();
+    closing = true;
+    flushProject().then(() => mainWin?.destroy());
+  });
   mainWin.on('closed', () => {
     mainWin = null;
     app.quit();
@@ -113,14 +293,48 @@ function openMainWindow(origin, c) {
 }
 
 function buildMenu() {
+  const hasMain = !!mainWin;
+  const { recent } = readProjects();
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
         label: 'Arquivo',
         submenu: [
+          { label: 'Novo Projeto…', accelerator: 'CmdOrCtrl+N', enabled: hasMain, click: newProject },
+          { label: 'Abrir Projeto…', accelerator: 'CmdOrCtrl+O', enabled: hasMain, click: openProjectDialog },
+          {
+            label: 'Projetos Recentes',
+            enabled: hasMain,
+            submenu: recent.length
+              ? [
+                  ...recent.map((file, i) => ({
+                    label: `${i + 1}. ${projectName(file)}`,
+                    sublabel: path.dirname(file),
+                    toolTip: file,
+                    click: () => openProject(file),
+                  })),
+                  { type: 'separator' },
+                  {
+                    label: 'Limpar lista',
+                    click: () => {
+                      writeProjects({ ...readProjects(), recent: [] });
+                      buildMenu();
+                    },
+                  },
+                ]
+              : [{ label: 'Nenhum projeto recente', enabled: false }],
+          },
+          {
+            label: 'Salvar Projeto',
+            accelerator: 'CmdOrCtrl+S',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('project:save'),
+          },
+          { type: 'separator' },
           {
             label: 'Trocar banco de dados…',
-            click: () => {
+            click: async () => {
+              await flushProject();
               app.relaunch();
               app.exit(0);
             },
@@ -213,6 +427,39 @@ ipcMain.handle('db:open', async (e, c) => {
   }
 });
 
+// ------------------------------------------------------------------ IPC (projetos)
+
+/** Projeto a abrir ao carregar o sistema: o último usado, se o arquivo ainda existir. */
+ipcMain.handle('project:initial', () => {
+  const { last } = readProjects();
+  if (!last) return null;
+  try {
+    return { path: last, name: projectName(last), data: readProjectFile(last) };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('project:write', (_e, file, data) => {
+  if (!isProjectFile(file)) return { ok: false, error: 'Arquivo de projeto inválido.' };
+  try {
+    writeProjectFile(file, data);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message ?? err) };
+  }
+});
+
+/** O sistema passou a usar este projeto (null = nenhum): título da janela e recentes. */
+ipcMain.on('project:activated', (_e, file) => {
+  if (file && isProjectFile(file)) {
+    addRecent(file);
+    mainWin?.setTitle(`${projectName(file)} — ${mainTitle}`);
+  } else {
+    mainWin?.setTitle(mainTitle);
+  }
+});
+
 // ------------------------------------------------------------------ ciclo de vida
 
 process.on('unhandledRejection', (err) => {
@@ -220,7 +467,11 @@ process.on('unhandledRejection', (err) => {
   dialog.showErrorBox('GeoAnalisys', String(err?.message ?? err));
 });
 
-if (!app.requestSingleInstanceLock()) {
+let checkingUpdate = false;
+
+if (applyingUpdate) {
+  app.whenReady().then(updater.applyUpdate);
+} else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -230,9 +481,15 @@ if (!app.requestSingleInstanceLock()) {
       w.focus();
     }
   });
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    checkingUpdate = true;
+    const updating = await updater.checkAndDownload();
+    checkingUpdate = false;
+    if (updating) return app.exit(0); // o exe novo assume: instala e reabre o programa
     buildMenu();
     openConnectWindow();
   });
-  app.on('window-all-closed', () => app.quit());
+  app.on('window-all-closed', () => {
+    if (!checkingUpdate) app.quit();
+  });
 }

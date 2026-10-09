@@ -10,6 +10,7 @@ import { useDebounce } from '@/hooks/useDebounce';
 import { useLayersData, type LayerRuntime } from '@/hooks/useLayers';
 import { errorMessage } from '@/lib/api';
 import { isAdditive, useMap, useSetMap } from '@/lib/mapContext';
+import { setProjectViewGetter } from '@/lib/project';
 import { pointsService } from '@/services/points';
 import { crsService } from '@/services/sources';
 import { useAppStore } from '@/stores/appStore';
@@ -91,8 +92,13 @@ function MapCanvas() {
     map.once('load', () => {
       setMap(map);
       setReady(true);
+      setProjectViewGetter(() => {
+        const c = map.getCenter();
+        return { center: { lat: c.lat, lng: c.lng }, zoom: map.getZoom() };
+      });
     });
     return () => {
+      setProjectViewGetter(null);
       setMap(null);
       map.remove();
     };

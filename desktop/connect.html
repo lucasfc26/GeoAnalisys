@@ -27,6 +27,8 @@
         padding: 18px 24px;
       }
       header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+      header .logo { width: 44px; height: 44px; border-radius: 10px; flex: none; box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.45); }
+      header.brand { display: flex; align-items: center; gap: 14px; }
       header p { margin: 4px 0 0; color: #94a3b8; font-size: 12.5px; }
       main { padding: 16px 24px 20px; }
       h2 {
@@ -99,9 +101,12 @@
     </style>
   </head>
   <body>
-    <header>
-      <h1>GeoAnalisys</h1>
-      <p>Conecte ao seu PostgreSQL e escolha o banco de dados</p>
+    <header class="brand">
+      <img class="logo" src="assets/logo.png" alt="" />
+      <div>
+        <h1>GeoAnalisys</h1>
+        <p>Conecte ao seu PostgreSQL e escolha o banco de dados</p>
+      </div>
     </header>
     <main>
       <section class="saved">

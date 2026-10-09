@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import type { Response } from 'express';
+import { currentProjectId } from '../../common/project-context';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { SourceContext } from '../tables/sources.service';
 import {
@@ -37,7 +38,21 @@ interface PutRow {
 
 const CHUNK = 2000;
 
-/** Tabela de Alterações (gis_app.alteracoes). As gravações acontecem na transação da edição. */
+/**
+ * Filtro do projeto atual sobre a coluna project_id (`IS NULL` sem projeto aberto, para usar o
+ * índice) e o parâmetro correspondente, se houver.
+ */
+function projectFilter(column: string, param: number): { sql: string; params: string[] } {
+  const id = currentProjectId();
+  return id
+    ? { sql: `${column} = $${param}`, params: [id] }
+    : { sql: `${column} IS NULL`, params: [] };
+}
+
+/**
+ * Tabela de Alterações (gis_app.alteracoes), separada pelo projeto aberto (x-project-id). As
+ * gravações acontecem na transação da edição.
+ */
 @Injectable()
 export class ChangesService {
   constructor(private readonly prisma: PrismaService) {}
@@ -71,6 +86,7 @@ export class ChangesService {
   ) {
     if (!changes.length) return;
     const order = this.order(ctx);
+    const project = projectFilter('project_id', 3);
     const existing = new Map<string, ChangeEntry>();
     for (let i = 0; i < changes.length; i += CHUNK) {
       const rows = await tx.$queryRawUnsafe<
@@ -83,9 +99,10 @@ export class ChangesService {
         }[]
       >(
         `SELECT record_id, action, attributes, old_values, new_values FROM alteracoes
-          WHERE source_id = $1 AND record_id = ANY($2::text[])`,
+          WHERE source_id = $1 AND record_id = ANY($2::text[]) AND ${project.sql}`,
         ctx.source.id,
         changes.slice(i, i + CHUNK).map((c) => c.id),
+        ...project.params,
       );
       for (const r of rows) {
         existing.set(r.record_id, {
@@ -118,9 +135,10 @@ export class ChangesService {
     await this.put(tx, ctx, puts);
     for (let i = 0; i < removes.length; i += CHUNK) {
       await tx.$executeRawUnsafe(
-        `DELETE FROM alteracoes WHERE source_id = $1 AND record_id = ANY($2::text[])`,
+        `DELETE FROM alteracoes WHERE source_id = $1 AND record_id = ANY($2::text[]) AND ${project.sql}`,
         ctx.source.id,
         removes.slice(i, i + CHUNK),
+        ...project.params,
       );
     }
   }
@@ -136,28 +154,46 @@ export class ChangesService {
     };
   }
 
-  /** Insere ou substitui (um ponto = uma linha) em lotes. */
+  /**
+   * Insere ou substitui (um ponto = uma linha por projeto) em lotes. Sem ON CONFLICT: a chave única
+   * inclui project_id, que é null sem projeto aberto (nulls não colidem no índice).
+   */
   private async put(tx: Db, ctx: SourceContext, rows: PutRow[]) {
+    const projectId = currentProjectId();
+    // $4 = id do projeto (ou null), usado no filtro e na inserção.
+    const project = projectFilter('a.project_id', 4);
     for (let i = 0; i < rows.length; i += CHUNK) {
       await tx.$executeRawUnsafe(
-        `INSERT INTO alteracoes (source_id, source_name, record_id, action, observation, attributes, old_values, new_values, created_at, updated_at)
-         SELECT $1, $2, t.record_id, t.action, t.observation,
-                ARRAY(SELECT jsonb_array_elements_text(COALESCE(t.attributes, '[]'::jsonb))),
+        `WITH t AS (
+           SELECT t.record_id, t.action, t.observation,
+                  ARRAY(SELECT jsonb_array_elements_text(COALESCE(t.attributes, '[]'::jsonb))) AS attributes,
+                  t.old_values, t.new_values
+             FROM jsonb_to_recordset($3::jsonb)
+               AS t(record_id text, action text, observation text, attributes jsonb, old_values jsonb, new_values jsonb)
+         ), upd AS (
+           UPDATE alteracoes a
+              SET source_name = $2, action = t.action, observation = t.observation,
+                  attributes = t.attributes, old_values = t.old_values, new_values = t.new_values,
+                  updated_at = now()
+             FROM t
+            WHERE a.source_id = $1 AND a.record_id = t.record_id AND ${project.sql}
+           RETURNING a.record_id
+         )
+         INSERT INTO alteracoes (project_id, source_id, source_name, record_id, action, observation, attributes, old_values, new_values, created_at, updated_at)
+         SELECT $4::text, $1, $2, t.record_id, t.action, t.observation, t.attributes,
                 t.old_values, t.new_values, now(), now()
-           FROM jsonb_to_recordset($3::jsonb)
-             AS t(record_id text, action text, observation text, attributes jsonb, old_values jsonb, new_values jsonb)
-         ON CONFLICT (source_id, record_id) DO UPDATE
-            SET source_name = EXCLUDED.source_name, action = EXCLUDED.action, observation = EXCLUDED.observation,
-                attributes = EXCLUDED.attributes, old_values = EXCLUDED.old_values, new_values = EXCLUDED.new_values,
-                updated_at = now()`,
+           FROM t
+          WHERE NOT EXISTS (SELECT 1 FROM upd WHERE upd.record_id = t.record_id)`,
         ctx.source.id,
         ctx.source.name,
         JSON.stringify(rows.slice(i, i + CHUNK)),
+        projectId,
       );
     }
   }
 
   async list(): Promise<ChangeRow[]> {
+    const project = projectFilter('c.project_id', 1);
     const rows = await this.prisma.$queryRawUnsafe<
       {
         id: string;
@@ -177,7 +213,9 @@ export class ChangesService {
               d."idColumn" AS "idColumn", c.record_id AS "recordId", c.action, c.observation, c.attributes,
               c.old_values AS "oldValues", c.new_values AS "newValues", c.updated_at AS "updatedAt"
          FROM alteracoes c LEFT JOIN data_source d ON d.id = c.source_id
+        WHERE ${project.sql}
         ORDER BY c.updated_at DESC, c.id DESC`,
+      ...project.params,
     );
     return rows.map((r) => ({
       ...r,
@@ -187,8 +225,13 @@ export class ChangesService {
     }));
   }
 
+  /** Limpa só as alterações do projeto aberto. */
   async clear() {
-    const deleted = await this.prisma.$executeRawUnsafe(`DELETE FROM alteracoes`);
+    const project = projectFilter('project_id', 1);
+    const deleted = await this.prisma.$executeRawUnsafe(
+      `DELETE FROM alteracoes WHERE ${project.sql}`,
+      ...project.params,
+    );
     return { deleted };
   }
 

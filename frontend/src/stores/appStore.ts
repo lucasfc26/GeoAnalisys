@@ -298,7 +298,10 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           searchWindows: [
             ...s.searchWindows,
-            { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`, sourceId },
+            {
+              id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,
+              sourceId,
+            },
           ],
         })),
       closeSearchWindow: (id) =>
@@ -435,6 +438,35 @@ export const useAppStore = create<AppState>()(
     },
   ),
 );
+
+/**
+ * Partes do estado que pertencem ao projeto (.proj). O layout do painel fica fora: é preferência
+ * da máquina, não do projeto.
+ */
+export const PROJECT_KEYS = [
+  'sourceId',
+  'tool',
+  'lastSelectTool',
+  'filters',
+  'layers',
+  'layerFilters',
+  'basemap',
+  'customBasemaps',
+  'boundaries',
+  'summaryColumns',
+  'exportTemplates',
+  'fieldOrder',
+] as const satisfies readonly (keyof AppState)[];
+
+export type ProjectState = Pick<AppState, (typeof PROJECT_KEYS)[number]>;
+
+export function projectStateOf(s: Partial<AppState>): Partial<ProjectState> {
+  const out: Partial<ProjectState> = {};
+  for (const k of PROJECT_KEYS) {
+    if (s[k] !== undefined) (out as Record<string, unknown>)[k] = s[k];
+  }
+  return out;
+}
 
 /** IDs de todos os registros selecionados (memoizar no componente). */
 export function selectedIdsOf(selection: Record<string, SelectedGroup>): string[] {

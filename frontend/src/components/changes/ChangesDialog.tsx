@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react';
 import { errorMessage } from '@/lib/api';
 import { changesService, type ChangeAction } from '@/services/changes';
 import { useAppStore } from '@/stores/appStore';
+import { useProjectStore } from '@/stores/projectStore';
 import { changeObservation, fmtChangeList } from '@/utils/changes';
 import { fmtInt } from '@/utils/format';
 import { Button } from '../ui/Button';
@@ -19,16 +20,24 @@ const DOT: Record<ChangeAction, string> = {
   UPDATE: 'bg-amber-500',
 };
 
-/** Tabela de Alterações: pontos adicionados, removidos e alterados, com download XLSX e limpeza. */
+/**
+ * Tabela de Alterações do projeto aberto: pontos adicionados, removidos e alterados, com download
+ * XLSX e limpeza (só as do projeto).
+ */
 export default function ChangesDialog() {
   const closeDialog = useAppStore((s) => s.closeDialog);
+  const project = useProjectStore((s) => s.project);
   const qc = useQueryClient();
   const [q, setQ] = useState('');
   const [page, setPage] = useState(0);
   const [confirmClear, setConfirmClear] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
-  const changes = useQuery({ queryKey: ['changes'], queryFn: changesService.list, staleTime: 0 });
+  const changes = useQuery({
+    queryKey: ['changes', project?.id ?? null],
+    queryFn: changesService.list,
+    staleTime: 0,
+  });
   const clear = useMutation({
     mutationFn: changesService.clear,
     onSuccess: (r) => {
@@ -69,14 +78,18 @@ export default function ChangesDialog() {
     <Dialog
       open
       size="xl"
-      title="Tabela de Alterações"
-      description="Pontos adicionados, removidos e alterados (edições repetidas mostram a 1ª versão e a atual)."
+      title={project ? `Tabela de Alterações — ${project.name}` : 'Tabela de Alterações'}
+      description={`Pontos adicionados, removidos e alterados ${
+        project ? 'neste projeto' : 'sem projeto aberto'
+      } (edições repetidas mostram a 1ª versão e a atual).`}
       onClose={() => closeDialog('changes')}
       footer={
         confirmClear ? (
           <>
             <span className="mr-auto text-sm font-medium text-red-700">
-              Limpar as {fmtInt(total)} alterações? Essa ação não pode ser desfeita.
+              Limpar as {fmtInt(total)} alterações{' '}
+              {project ? `do projeto "${project.name}"` : 'feitas sem projeto'}? Essa ação não pode
+              ser desfeita.
             </span>
             <Button onClick={() => setConfirmClear(false)}>Cancelar</Button>
             <Button variant="danger" loading={clear.isPending} onClick={() => clear.mutate()}>
