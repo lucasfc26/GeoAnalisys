@@ -11,7 +11,7 @@
  *
  * Qualquer falha (sem internet, GitHub bloqueado, release ainda não publicado) só pula a atualização.
  */
-const { app, BrowserWindow, ipcMain, net } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, net } = require('electron');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -28,8 +28,24 @@ const childEnv = () => {
   delete env.ELECTRON_RUN_AS_NODE;
   return env;
 };
-const updateDir = `${appDir}.update`;
-const zipFile = `${appDir}.update.zip`;
+/**
+ * Onde baixar e extrair a versão nova: ao lado da pasta do programa ("<pasta>.update") ou, quando
+ * não dá para escrever ali (programa direto em C:\, por exemplo), na pasta temporária do usuário.
+ */
+const besideDir = `${appDir}.update`;
+const tempDir = () => path.join(app.getPath('temp'), 'GeoAnalisys-update');
+let updateDir = besideDir;
+let zipFile = `${besideDir}.zip`;
+
+function chooseWorkDir() {
+  if (canWrite(path.dirname(appDir))) {
+    updateDir = besideDir;
+    zipFile = `${besideDir}.zip`;
+  } else {
+    updateDir = tempDir();
+    zipFile = `${tempDir()}.zip`;
+  }
+}
 
 /** Registro em %APPDATA%GeoAnalisysatualizacao.log, para diagnosticar falhas no computador do usuário. */
 function log(...parts) {
@@ -190,7 +206,9 @@ async function checkAndDownload() {
   // Resto de uma atualização anterior (o exe novo já terminou de copiar e saiu). Cancelado se uma
   // atualização nova começar, para não apagar o download em andamento.
   const cleanup = setTimeout(() => {
-    for (const p of [updateDir, zipFile]) fs.rm(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 }, () => {});
+    for (const p of [besideDir, `${besideDir}.zip`, tempDir(), `${tempDir()}.zip`]) {
+      fs.rm(p, { recursive: true, force: true, maxRetries: 10, retryDelay: 500 }, () => {});
+    }
   }, 5000);
 
   let latest;
@@ -203,10 +221,22 @@ async function checkAndDownload() {
     }
     latest = await r.json();
     if (!latest?.version || !newer(latest.version, app.getVersion())) return false;
-    if (!canWrite(appDir) || !canWrite(path.dirname(appDir))) {
+    if (!canWrite(appDir)) {
       log('sem permissão de escrita em', appDir);
+      // Avisa (antes pulava em silêncio) e segue abrindo a versão atual.
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: 'GeoAnalisys — atualização',
+        message: `Há uma versão nova (${latest.version}), mas não foi possível atualizar.`,
+        detail:
+          `O Windows não permite gravar na pasta do programa:\n${appDir}\n\n` +
+          'Mova a pasta do GeoAnalisys para um local seu (ex.: Documentos ou C:\\Users\\<você>) ' +
+          `ou baixe a versão ${latest.version} manualmente. O programa vai abrir na versão atual ` +
+          `(${app.getVersion()}).`,
+      });
       return false;
     }
+    chooseWorkDir();
     // Só mostra a tela se o release realmente existe.
     const url = latest.url || zipUrl(latest.version);
     res = await fetchWithTimeout(url, 10000);

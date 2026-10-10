@@ -57,11 +57,26 @@ async function listDatabases(c) {
 /**
  * Cria/atualiza as tabelas internas do sistema (schema gis_app) no banco escolhido — o mesmo
  * "prisma db push" que o modo web roda ao iniciar. Nunca apaga dados (sem --accept-data-loss).
+ *
+ * Banco já atualizado por uma versão mais nova do programa (ex.: outra máquina já na versão
+ * seguinte): o push recusaria apagar as colunas/tabelas que esta versão não conhece. Nesse caso
+ * segue sem mexer no banco — as versões novas só acrescentam, então o que esta versão usa já existe.
  */
 async function prepareDatabase(url) {
   // Renomeações que o push faria apagando dados (ex.: change_log -> alteracoes).
   await prisma(url, ['db', 'execute', '--file', PRE_PUSH, '--schema', SCHEMA]);
-  return prisma(url, ['db', 'push', '--skip-generate', '--schema', SCHEMA]);
+  try {
+    return await prisma(url, ['db', 'push', '--skip-generate', '--schema', SCHEMA]);
+  } catch (err) {
+    if (!isNewerSchema(err.output)) throw err;
+    console.warn('[GeoAnalisys] Banco criado por uma versão mais nova; tabelas mantidas como estão.');
+    return err.output;
+  }
+}
+
+/** O push só foi recusado por apagar algo (colunas/tabelas de uma versão mais nova). */
+function isNewerSchema(output = '') {
+  return /--accept-data-loss/.test(output) && /data loss/i.test(output);
 }
 
 function prisma(url, args) {
@@ -75,7 +90,12 @@ function prisma(url, args) {
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
     child.on('error', reject);
-    child.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(friendlyError(out)))));
+    child.on('close', (code) => {
+      if (code === 0) return resolve(out);
+      const err = new Error(friendlyError(out));
+      err.output = out;
+      reject(err);
+    });
   });
 }
 
