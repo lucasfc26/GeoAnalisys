@@ -1,6 +1,6 @@
 {
   "name": "geoanalisys",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "private": true,
   "description": "GeoAnalisys — sistema GIS de pontos com coordenadas UTM (NestJS + Prisma + React + MapLibre)",
   "workspaces": [

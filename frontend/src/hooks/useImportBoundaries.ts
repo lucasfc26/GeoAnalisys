@@ -11,6 +11,18 @@ export const BOUNDARY_ACCEPT = '.zip,.shp,.dbf,.prj,.cpg,.shx,.geojson,.json,.km
 
 const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+const stem = (name: string) => name.replace(/\.[^.]+$/, '').toLowerCase();
+
+/**
+ * Arquivos de origem de um limite: os de mesmo nome (shapefile = .shp + .dbf + .prj…) ou, sem
+ * correspondência (ex.: um .zip com vários), todos. Caminho completo no programa desktop.
+ */
+function originOf(files: File[], name: string): string[] {
+  const where = (f: File) => window.geoanalisys?.files?.pathOf(f) || f.name;
+  const same = files.filter((f) => stem(f.name) === name.toLowerCase());
+  return (same.length ? same : files).map(where);
+}
+
 /** Importa limites (shapefile/GeoJSON) para o mapa; devolve os limites criados. */
 export function useImportBoundaries() {
   const addBoundaries = useAppStore((s) => s.addBoundaries);
@@ -42,6 +54,7 @@ export function useImportBoundaries() {
           visible: true,
           features: p.data.features.length,
           bounds: p.bounds,
+          origin: originOf([...files], p.name),
         });
         if (hasNoAttributes(p.data))
           toast.info(

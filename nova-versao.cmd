@@ -2,7 +2,7 @@
 rem ============================================================================================
 rem  Publica uma nova versao do GeoAnalisys. Edite SO a linha abaixo e de dois cliques no arquivo.
 rem ============================================================================================
-set VERSAO=1.0.13
+set VERSAO=1.0.14
 
 rem Etapas:
 rem   1. testes (frontend e backend)

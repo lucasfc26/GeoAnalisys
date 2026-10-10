@@ -18,6 +18,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsIn,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -28,7 +29,7 @@ import type { Response } from 'express';
 import { parseFilters } from '../../common/filters';
 import { MAX_IDS } from '../points/dto/points.dto';
 import { ExportTemplatesService } from './export-templates.service';
-import { ExportFormat, ExportService } from './export.service';
+import { ExportFormat, ExportService, cleanHeaders } from './export.service';
 
 enum Format {
   csv = 'csv',
@@ -54,6 +55,18 @@ function parseColumns(raw?: string): string[] | undefined {
   return v as string[];
 }
 
+/** `headers` na query string: objeto JSON { coluna: nome no arquivo }. */
+function parseHeaders(raw?: string): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    throw new BadRequestException('headers deve ser um objeto JSON');
+  }
+  return cleanHeaders(v);
+}
+
 class ExportQueryDto {
   @IsUUID() sourceId: string;
   @IsOptional() @IsIn(['all', 'filtered']) scope?: 'all' | 'filtered';
@@ -61,6 +74,7 @@ class ExportQueryDto {
   @IsOptional() @IsIn([';', ',', 'tab', '|']) delimiter?: string;
   @IsOptional() @IsIn(['.', ',']) decimal?: '.' | ',';
   @IsOptional() @IsString() columns?: string;
+  @IsOptional() @IsString() headers?: string;
 }
 
 class PreviewBodyDto {
@@ -73,6 +87,8 @@ class PreviewBodyDto {
   @ArrayMaxSize(MAX_COLUMNS)
   @IsString({ each: true })
   columns?: string[];
+  /** Nome alternativo no cabeçalho, por coluna */
+  @IsOptional() @IsObject() headers?: Record<string, string>;
 }
 
 class ExportBodyDto extends PreviewBodyDto {
@@ -81,7 +97,10 @@ class ExportBodyDto extends PreviewBodyDto {
 }
 
 class UpdateTemplateDto {
-  @IsOptional() @IsString() @MaxLength(100) @Matches(/\S/, { message: 'Informe o nome do modelo' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  @Matches(/\S/, { message: 'Informe o nome do modelo' })
   name?: string;
   @IsOptional()
   @IsArray()
@@ -89,14 +108,21 @@ class UpdateTemplateDto {
   @ArrayMaxSize(MAX_COLUMNS)
   @IsString({ each: true })
   columns?: string[];
+  @IsOptional() @IsObject() headers?: Record<string, string>;
 }
 
 class CreateTemplateDto {
   @IsUUID() sourceId: string;
-  @IsString() @MaxLength(100) @Matches(/\S/, { message: 'Informe o nome do modelo' })
+  @IsString()
+  @MaxLength(100)
+  @Matches(/\S/, { message: 'Informe o nome do modelo' })
   name: string;
-  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(MAX_COLUMNS) @IsString({ each: true })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_COLUMNS)
+  @IsString({ each: true })
   columns: string[];
+  @IsOptional() @IsObject() headers?: Record<string, string>;
 }
 
 @ApiTags('export')
@@ -139,6 +165,7 @@ export class ExportController {
       filters: parseFilters(body.filters),
       ids: body.ids,
       columns: body.columns,
+      headers: cleanHeaders(body.headers),
     });
   }
 
@@ -161,6 +188,7 @@ export class ExportController {
         delimiter: q.delimiter,
         decimal: q.decimal,
         columns: parseColumns(q.columns),
+        headers: parseHeaders(q.headers),
       },
       res,
     );
@@ -183,6 +211,7 @@ export class ExportController {
         delimiter: body.delimiter,
         decimal: body.decimal,
         columns: body.columns,
+        headers: cleanHeaders(body.headers),
       },
       res,
     );

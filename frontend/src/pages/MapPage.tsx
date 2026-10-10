@@ -27,6 +27,9 @@ const ChangesDialog = lazy(() => import('@/components/changes/ChangesDialog'));
 const ImportLayerDialog = lazy(() => import('@/components/layers/ImportLayerDialog'));
 const CopyToLayerDialog = lazy(() => import('@/components/layers/CopyToLayerDialog'));
 const MapMakerDialog = lazy(() => import('@/components/maps/MapMakerDialog'));
+const AssociateLayersDialog = lazy(() => import('@/components/tools/AssociateLayersDialog'));
+const LayerAboutDialog = lazy(() => import('@/components/layers/LayerAboutDialog'));
+const ShortcutsDialog = lazy(() => import('@/components/help/ShortcutsDialog'));
 
 function Dialogs() {
   const d = useAppStore((s) => s.dialogs);
@@ -43,6 +46,9 @@ function Dialogs() {
       {d.importLayer && <ImportLayerDialog />}
       {d.copyToLayer && <CopyToLayerDialog />}
       {d.mapMaker && <MapMakerDialog />}
+      {d.associate && <AssociateLayersDialog />}
+      {d.layerAbout && <LayerAboutDialog />}
+      {d.shortcuts && <ShortcutsDialog />}
     </Suspense>
   );
 }

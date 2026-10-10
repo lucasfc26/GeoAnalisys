@@ -111,7 +111,10 @@ export function FloatingPanel({
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      document.body.classList.remove('panel-dragging');
     };
+    // Iframes (preview do modo lista) não "roubam" o mouse durante o arraste.
+    document.body.classList.add('panel-dragging');
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };

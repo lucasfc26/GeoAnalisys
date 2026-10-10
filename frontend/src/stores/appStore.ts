@@ -2,6 +2,16 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { newLayer } from '@/lib/layers';
 import {
+  dropNode,
+  moveToGroup,
+  newGroupId,
+  stepNode,
+  syncTree,
+  ungroup,
+  type DropWhere,
+  type TreeRef,
+} from '@/lib/layerTree';
+import {
   SELECT_TOOLS,
   type Basemap,
   type BoundaryLayer,
@@ -10,17 +20,20 @@ import {
   type FilterDef,
   type LatLng,
   type LayerStyle,
+  type LayerTreeNode,
   type SelectTool,
   type SelectedGroup,
   type Tool,
   type TransformMode,
 } from '@/types';
 
-/** Janela "Selecionar por valor" de uma camada. */
+/** Janela flutuante presa a uma camada ("Selecionar por valor" ou "Modo lista"). */
 export interface SearchWindow {
   id: string;
   sourceId: string;
 }
+
+const windowId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
 export type FormState =
   { mode: 'create'; initial?: Record<string, unknown> } | { mode: 'edit'; id: string } | null;
@@ -44,6 +57,8 @@ interface AppState {
   filters: FilterDef[];
   /** Camadas no mapa (índice 0 = topo, desenhada por cima) */
   layers: LayerStyle[];
+  /** Painel de camadas: grupos (pastas) e camadas soltas; achatada = ordem de `layers` */
+  layerTree: LayerTreeNode[];
   /** Filtros guardados de cada camada */
   layerFilters: Record<string, FilterDef[]>;
   /** Seleção: coordenada -> registros */
@@ -60,7 +75,8 @@ interface AppState {
   /** Mover/duplicar a seleção arrastando no mapa (null = desligado) */
   transform: TransformMode | null;
   /** Painel do modo lista aberto */
-  listMode: boolean;
+  /** Janelas do modo lista: várias, cada uma presa à camada em que foi aberta */
+  listWindows: SearchWindow[];
   /** Janelas "Selecionar por valor" abertas (várias, cada uma na sua camada) */
   searchWindows: SearchWindow[];
   /** Mapa de fundo */
@@ -88,7 +104,10 @@ interface AppState {
   /** Ordem dos campos no painel de informações, por camada (só visual; o banco não muda) */
   fieldOrder: Record<string, string[]>;
   dialogs: {
-    source: boolean;
+    /** 'new': abre direto no formulário de nova fonte (Adicionar › Camada › Banco de dados) */
+    source: boolean | 'new' | { edit: string };
+    /** Camadas › Sobre: origem da camada ou do limite */
+    layerAbout: TreeRef | { kind: 'boundary'; id: string } | null;
     export: boolean;
     bulkEdit: boolean;
     filters: boolean;
@@ -103,6 +122,10 @@ interface AppState {
     copyToLayer: boolean;
     /** Criar mapa HTML (Comitê / Status 18) */
     mapMaker: boolean;
+    /** Ferramentas › Associar Camadas */
+    associate: boolean;
+    /** Sobre › Atalhos */
+    shortcuts: boolean;
   };
 
   /** Torna a fonte a camada ativa (e a adiciona ao mapa, se preciso). */
@@ -113,10 +136,24 @@ interface AppState {
     id: string,
     patch: Partial<LayerStyle> | ((l: LayerStyle) => Partial<LayerStyle>),
   ) => void;
-  moveLayer: (id: string, delta: number) => void;
+  /** Setas: sobe/desce a camada ou o grupo dentro do mesmo nível */
+  moveLayer: (id: string, delta: -1 | 1, kind?: TreeRef['kind']) => void;
+  /** Arrastar e soltar no painel de camadas */
+  dropLayer: (drag: TreeRef, target: TreeRef, where: DropWhere) => void;
+  /** Novo grupo no topo; devolve o id */
+  addGroup: (name: string) => string;
+  updateGroup: (id: string, patch: { name?: string; expanded?: boolean }) => void;
+  /** Desfaz o grupo (as camadas ficam) */
+  removeGroup: (id: string) => void;
+  /** Põe a camada no grupo (null = fora de grupos) */
+  setLayerGroup: (layerId: string, groupId: string | null) => void;
+  moveBoundary: (id: string, delta: -1 | 1) => void;
+  /** Arrastar e soltar um limite antes/depois de outro */
+  dropBoundary: (dragId: string, targetId: string, where: 'before' | 'after') => void;
   setTool: (tool: Tool) => void;
   setTransform: (mode: TransformMode | null) => void;
-  setListMode: (open: boolean) => void;
+  openListWindow: (sourceId: string) => void;
+  closeListWindow: (id: string) => void;
   /** Abre mais uma janela "Selecionar por valor" para a camada */
   openSearchWindow: (sourceId: string) => void;
   closeSearchWindow: (id: string) => void;
@@ -149,6 +186,7 @@ interface AppState {
 
 const closedDialogs: AppState['dialogs'] = {
   source: false,
+  layerAbout: null,
   export: false,
   bulkEdit: false,
   filters: false,
@@ -159,6 +197,8 @@ const closedDialogs: AppState['dialogs'] = {
   importLayer: false,
   copyToLayer: false,
   mapMaker: false,
+  associate: false,
+  shortcuts: false,
 };
 
 const noSelection = {
@@ -188,13 +228,14 @@ export const useAppStore = create<AppState>()(
       lastSelectTool: 'select',
       filters: [],
       layers: [],
+      layerTree: [],
       layerFilters: {},
       selection: {},
       primaryIds: null,
       activeKey: null,
       activeRecordId: null,
       transform: null,
-      listMode: false,
+      listWindows: [],
       searchWindows: [],
       basemap: 'osm',
       customBasemaps: [],
@@ -215,7 +256,7 @@ export const useAppStore = create<AppState>()(
         set((s) => {
           if (id === s.sourceId) {
             return id && !s.layers.some((l) => l.sourceId === id)
-              ? { layers: [newLayer(id, s.layers.length), ...s.layers] }
+              ? syncTree([newLayer(id, s.layers.length), ...s.layers], s.layerTree)
               : {};
           }
           const layerFilters = s.sourceId
@@ -231,7 +272,7 @@ export const useAppStore = create<AppState>()(
             sourceId: id,
             filters: id ? (layerFilters[id] ?? []) : [],
             layerFilters,
-            layers,
+            ...syncTree(layers, s.layerTree),
             ...noSelection,
           };
         }),
@@ -239,24 +280,30 @@ export const useAppStore = create<AppState>()(
       addLayer: (id) =>
         set((s) => {
           if (s.layers.some((l) => l.sourceId === id)) return {};
-          const layers = [newLayer(id, s.layers.length), ...s.layers];
+          const tree = syncTree([newLayer(id, s.layers.length), ...s.layers], s.layerTree);
           // Primeira camada vira a ativa.
           return s.sourceId
-            ? { layers }
-            : { layers, sourceId: id, filters: s.layerFilters[id] ?? [], ...noSelection };
+            ? tree
+            : { ...tree, sourceId: id, filters: s.layerFilters[id] ?? [], ...noSelection };
         }),
 
       removeLayer: (id) =>
         set((s) => {
-          const layers = s.layers.filter((l) => l.sourceId !== id);
-          // Janelas de pesquisa da camada removida fecham junto.
+          const tree = syncTree(
+            s.layers.filter((l) => l.sourceId !== id),
+            s.layerTree,
+          );
+          const { layers } = tree;
+          // Janelas de pesquisa e do modo lista da camada removida fecham junto.
           const searchWindows = s.searchWindows.filter((w) => w.sourceId !== id);
-          if (s.sourceId !== id) return { layers, searchWindows };
+          const listWindows = s.listWindows.filter((w) => w.sourceId !== id);
+          if (s.sourceId !== id) return { ...tree, searchWindows, listWindows };
           const next = layers[0]?.sourceId ?? null;
           const layerFilters = { ...s.layerFilters, [id]: s.filters };
           return {
-            layers,
+            ...tree,
             searchWindows,
+            listWindows,
             layerFilters,
             sourceId: next,
             filters: next ? (layerFilters[next] ?? []) : [],
@@ -271,14 +318,68 @@ export const useAppStore = create<AppState>()(
           ),
         })),
 
-      moveLayer: (id, delta) =>
+      moveLayer: (id, delta, kind = 'layer') =>
         set((s) => {
-          const i = s.layers.findIndex((l) => l.sourceId === id);
+          const { layers, layerTree } = syncTree(s.layers, s.layerTree);
+          return syncTree(layers, stepNode(layerTree, { kind, id }, delta));
+        }),
+
+      dropLayer: (drag, target, where) =>
+        set((s) => {
+          const { layers, layerTree } = syncTree(s.layers, s.layerTree);
+          return syncTree(layers, dropNode(layerTree, drag, target, where));
+        }),
+
+      addGroup: (name) => {
+        const id = newGroupId();
+        set((s) => {
+          const { layers, layerTree } = syncTree(s.layers, s.layerTree);
+          return syncTree(layers, [
+            { kind: 'group', id, name, expanded: true, children: [] },
+            ...layerTree,
+          ]);
+        });
+        return id;
+      },
+
+      updateGroup: (id, patch) =>
+        set((s) => ({
+          layerTree: s.layerTree.map((n) =>
+            n.kind === 'group' && n.id === id ? { ...n, ...patch } : n,
+          ),
+        })),
+
+      removeGroup: (id) =>
+        set((s) => {
+          const { layers, layerTree } = syncTree(s.layers, s.layerTree);
+          return syncTree(layers, ungroup(layerTree, id));
+        }),
+
+      setLayerGroup: (layerId, groupId) =>
+        set((s) => {
+          const { layers, layerTree } = syncTree(s.layers, s.layerTree);
+          return syncTree(layers, moveToGroup(layerTree, layerId, groupId));
+        }),
+
+      moveBoundary: (id, delta) =>
+        set((s) => {
+          const i = s.boundaries.findIndex((b) => b.id === id);
           const j = i + delta;
-          if (i < 0 || j < 0 || j >= s.layers.length) return {};
-          const layers = [...s.layers];
-          [layers[i], layers[j]] = [layers[j], layers[i]];
-          return { layers };
+          if (i < 0 || j < 0 || j >= s.boundaries.length) return {};
+          const boundaries = [...s.boundaries];
+          [boundaries[i], boundaries[j]] = [boundaries[j], boundaries[i]];
+          return { boundaries };
+        }),
+
+      dropBoundary: (dragId, targetId, where) =>
+        set((s) => {
+          const item = s.boundaries.find((b) => b.id === dragId);
+          if (!item || dragId === targetId) return {};
+          const rest = s.boundaries.filter((b) => b.id !== dragId);
+          const i = rest.findIndex((b) => b.id === targetId);
+          if (i < 0) return {};
+          rest.splice(where === 'after' ? i + 1 : i, 0, item);
+          return { boundaries: rest };
         }),
 
       setTool: (tool) =>
@@ -293,16 +394,13 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           transform: transform && Object.keys(s.selection).length ? transform : null,
         })),
-      setListMode: (listMode) => set({ listMode }),
+      openListWindow: (sourceId) =>
+        set((s) => ({ listWindows: [...s.listWindows, { id: windowId(), sourceId }] })),
+      closeListWindow: (id) =>
+        set((s) => ({ listWindows: s.listWindows.filter((w) => w.id !== id) })),
       openSearchWindow: (sourceId) =>
         set((s) => ({
-          searchWindows: [
-            ...s.searchWindows,
-            {
-              id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`,
-              sourceId,
-            },
-          ],
+          searchWindows: [...s.searchWindows, { id: windowId(), sourceId }],
         })),
       closeSearchWindow: (id) =>
         set((s) => ({ searchWindows: s.searchWindows.filter((w) => w.id !== id) })),
@@ -422,6 +520,7 @@ export const useAppStore = create<AppState>()(
         lastSelectTool: s.lastSelectTool,
         filters: s.filters,
         layers: s.layers,
+        layerTree: s.layerTree,
         layerFilters: s.layerFilters,
         basemap: s.basemap,
         customBasemaps: s.customBasemaps,
@@ -449,6 +548,7 @@ export const PROJECT_KEYS = [
   'lastSelectTool',
   'filters',
   'layers',
+  'layerTree',
   'layerFilters',
   'basemap',
   'customBasemaps',

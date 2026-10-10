@@ -6,7 +6,16 @@ export const NULL_KEY = '__null__';
 export const catKey = (v: string | null) => (v === null ? NULL_KEY : v);
 
 /** Cores padrão por camada (símbolo único), para diferenciar tabelas. */
-const LAYER_COLORS = ['#16a34a', '#06b6d4', '#d946ef', '#f59e0b', '#2563eb', '#dc2626', '#65a30d', '#7c3aed'];
+const LAYER_COLORS = [
+  '#16a34a',
+  '#06b6d4',
+  '#d946ef',
+  '#f59e0b',
+  '#2563eb',
+  '#dc2626',
+  '#65a30d',
+  '#7c3aed',
+];
 
 export const DEFAULT_SIZE = 6;
 export const DEFAULT_OUTLINE_COLOR = '#000000';
@@ -50,6 +59,14 @@ export const labelFontStack = (lab: LabelStyle) =>
 export const labelCanvasFont = (lab: LabelStyle) =>
   `${lab.italic ? 'italic ' : ''}${lab.bold ? 'bold ' : ''}${lab.size}px ${labelFontStack(lab)}`;
 
+/** Nome da camada no sistema: o renomeado no painel (só visual) ou o nome da fonte. */
+export function layerName(
+  layer: Pick<LayerStyle, 'name'> | undefined,
+  source: Pick<DataSource, 'name'> | undefined,
+): string {
+  return layer?.name?.trim() || source?.name || '…';
+}
+
 export function newLayer(sourceId: string, index: number): LayerStyle {
   return {
     sourceId,
@@ -75,8 +92,7 @@ export function newLayer(sourceId: string, index: number): LayerStyle {
 // `label` é sempre o rótulo em uso; com um template ativo, as edições em `label` são gravadas nele
 // (syncLabelTemplate) antes de trocar de template ou salvar a camada.
 
-const newTemplateId = () =>
-  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const newTemplateId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 /** Copia o rótulo em uso para o template ativo. */
 export function syncLabelTemplate(l: LayerStyle): LayerStyle {
@@ -134,14 +150,19 @@ export const hasLabels = (lab: LabelStyle) => lab.enabled && !!lab.expression.tr
 
 /** Parâmetros efetivos de consulta da camada (coluna de estilo e expressão de rótulo). */
 export function resolveLayer(layer: LayerStyle, source?: DataSource | null) {
-  const styleColumn = layer.styleColumn === undefined ? (source?.categoryColumn ?? null) : layer.styleColumn;
+  const styleColumn =
+    layer.styleColumn === undefined ? (source?.categoryColumn ?? null) : layer.styleColumn;
   const label = hasLabels(layer.label) ? layer.label.expression.trim() : '';
   return { styleColumn, label };
 }
 
 export function categoryStyle(layer: LayerStyle, value: string | null): CategoryStyle {
   const c = layer.categories[catKey(value)];
-  return { color: c?.color ?? categoryColor(value), size: c?.size ?? layer.size, visible: c?.visible ?? true };
+  return {
+    color: c?.color ?? categoryColor(value),
+    size: c?.size ?? layer.size,
+    visible: c?.visible ?? true,
+  };
 }
 
 /**

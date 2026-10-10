@@ -3,9 +3,32 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ColumnMeta, kindOf, pgis, setPostgisSchema } from '../../common/sql';
 
 /** Schemas que nunca são oferecidos como fonte de dados. */
-const HIDDEN_SCHEMAS = ['pg_catalog', 'information_schema', 'pg_toast', 'gis_app', 'topology', 'tiger'];
+const HIDDEN_SCHEMAS = [
+  'pg_catalog',
+  'information_schema',
+  'pg_toast',
+  'gis_app',
+  'topology',
+  'tiger',
+];
 /** Tabelas de sistema do PostGIS. */
-const HIDDEN_TABLES = ['spatial_ref_sys', 'geometry_columns', 'geography_columns', 'raster_columns', 'raster_overviews'];
+const HIDDEN_TABLES = [
+  'spatial_ref_sys',
+  'geometry_columns',
+  'geography_columns',
+  'raster_columns',
+  'raster_overviews',
+];
+
+/** Servidor e porta da conexão (DATABASE_URL), sem a senha. */
+export function serverOf(url?: string): { host: string | null; port: number | null } {
+  try {
+    const u = new URL(url ?? '');
+    return { host: decodeURIComponent(u.hostname) || null, port: Number(u.port) || 5432 };
+  } catch {
+    return { host: null, port: null };
+  }
+}
 
 interface RawColumn {
   name: string;
@@ -36,7 +59,9 @@ export class CatalogService implements OnModuleInit {
           WHERE e.extname = 'postgis'`,
       );
       setPostgisSchema(rows[0]?.schema ?? null);
-      this.logger.log(rows[0] ? `PostGIS detectado no schema "${rows[0].schema}"` : 'PostGIS não instalado');
+      this.logger.log(
+        rows[0] ? `PostGIS detectado no schema "${rows[0].schema}"` : 'PostGIS não instalado',
+      );
     } catch (err) {
       this.logger.warn(`Não foi possível detectar o PostGIS: ${(err as Error).message}`);
     }
@@ -49,7 +74,7 @@ export class CatalogService implements OnModuleInit {
       `SELECT current_database()::text AS database, version()::text AS version, current_user::text AS "user",
               (SELECT extversion::text FROM pg_extension WHERE extname = 'postgis') AS postgis`,
     );
-    return row;
+    return { ...row, ...serverOf(process.env.DATABASE_URL) };
   }
 
   async listDatabases(): Promise<string[]> {

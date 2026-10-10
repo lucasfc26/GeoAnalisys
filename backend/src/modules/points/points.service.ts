@@ -7,6 +7,7 @@ import { SourceContext, SourcesService } from '../tables/sources.service';
 import { FilterDef, buildFilterConditions } from '../../common/filters';
 import { LatLng, LatLngBounds, coordKey, inBounds } from '../../common/geo';
 import { labelSql } from '../../common/label-expr';
+import { MAX_IDS } from './dto/points.dto';
 import {
   ColumnMeta,
   Params,
@@ -670,10 +671,28 @@ export class PointsService {
 
     // Uma entrada por valor informado, na mesma ordem (repetidos inclusive: listas comparativas são
     // pareadas por posição).
-    const items = values.map((v) => {
+    const items: {
+      value: string;
+      groups: Group[];
+      /** Não encontrado na tabela, mas removido (Tabela de Alterações): justificativa */
+      removed?: { observation: string | null };
+    }[] = values.map((v) => {
       const k = norm(v);
       return { value: v.trim(), groups: k === null ? [] : [...(byValue.get(k)?.values() ?? [])] };
     });
+
+    // Lista de IDs: os não encontrados podem ter sido removidos (a Tabela de Alterações guarda o id).
+    if (col.name === ctx.idCol.name) {
+      const missing = items.filter((i) => !i.groups.length && i.value);
+      const candidates = (v: string) => [...new Set([v, norm(v)].filter((x): x is string => !!x))];
+      const removed = await this.changes.removed(ctx.source.id, [
+        ...new Set(missing.flatMap((i) => candidates(i.value))),
+      ]);
+      for (const i of missing) {
+        const hit = candidates(i.value).find((c) => removed.has(c));
+        if (hit !== undefined) i.removed = { observation: removed.get(hit) ?? null };
+      }
+    }
     return { column: col.name, items };
   }
 
@@ -995,6 +1014,17 @@ export class PointsService {
     );
   }
 
+  /** Valida as alterações de uma edição em massa e devolve as colunas alteradas. */
+  private checkBulkChanges(ctx: SourceContext, changes: Record<string, unknown>) {
+    const blocked = [ctx.idCol.name, ctx.xCol.name, ctx.yCol.name];
+    const keys = Object.keys(changes);
+    if (!keys.length) throw new BadRequestException('Nada para alterar');
+    const bad = keys.find((k) => blocked.includes(k));
+    if (bad) throw new BadRequestException(`A coluna "${bad}" não pode ser alterada em massa`);
+    this.buildAssignments(ctx, new Params(), changes, { forInsert: false });
+    return keys;
+  }
+
   /** Edição em massa (mesmo valor para vários registros) em uma transação. */
   async bulkUpdate(
     sourceId: string,
@@ -1003,11 +1033,7 @@ export class PointsService {
     userId: string,
   ) {
     const ctx = await this.sources.context(sourceId);
-    const blocked = [ctx.idCol.name, ctx.xCol.name, ctx.yCol.name];
-    const keys = Object.keys(changes);
-    if (!keys.length) throw new BadRequestException('Nada para alterar');
-    const bad = keys.find((k) => blocked.includes(k));
-    if (bad) throw new BadRequestException(`A coluna "${bad}" não pode ser alterada em massa`);
+    const keys = this.checkBulkChanges(ctx, changes);
 
     return this.prisma.$transaction(
       async (tx) => {
@@ -1041,6 +1067,36 @@ export class PointsService {
         return { updated };
       },
       { timeout: 120_000, maxWait: 10_000 },
+    );
+  }
+
+  /** Substituição: mesmo valor em todos os registros que atendem aos filtros (com ou sem coordenada). */
+  async replaceFiltered(
+    sourceId: string,
+    filters: FilterDef[],
+    changes: Record<string, unknown>,
+    userId: string,
+  ) {
+    const ctx = await this.sources.context(sourceId);
+    this.checkBulkChanges(ctx, changes);
+    const params = new Params();
+    const conds = buildFilterConditions(filters, ctx.colMap, params);
+    const where = conds.length ? `WHERE ${conds.map((c) => `(${c})`).join(' AND ')}` : '';
+    const rows = await this.prisma.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT ${qi(ctx.idCol.name)}::text AS id FROM ${ctx.table} ${where} LIMIT ${MAX_IDS + 1}`,
+      ...params.values,
+    );
+    if (rows.length > MAX_IDS) {
+      throw new BadRequestException(
+        `Mais de ${MAX_IDS.toLocaleString('pt-BR')} registros: refine os filtros`,
+      );
+    }
+    if (!rows.length) return { updated: 0 };
+    return this.bulkUpdate(
+      sourceId,
+      rows.map((r) => r.id),
+      changes,
+      userId,
     );
   }
 

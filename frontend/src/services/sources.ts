@@ -11,9 +11,15 @@ import type {
 
 export const databaseService = {
   info: () =>
-    api.get<{ database: string; version: string; user: string; postgis: string | null }>(
-      '/database/info',
-    ),
+    api.get<{
+      database: string;
+      version: string;
+      user: string;
+      postgis: string | null;
+      /** Servidor e porta da conexão (null em backends antigos) */
+      host?: string | null;
+      port?: number | null;
+    }>('/database/info'),
   databases: () => api.get<string[]>('/database/databases'),
   schemas: () => api.get<string[]>('/database/schemas'),
   tables: (schema: string) => api.get<TableInfo[]>(`/database/tables${qs({ schema })}`),

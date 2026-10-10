@@ -260,3 +260,15 @@ export class BulkUpdateDto extends IdsDto {
   @IsObject()
   changes: Record<string, unknown>;
 }
+
+export class ReplaceDto {
+  @IsUUID() sourceId: string;
+
+  @ApiProperty({ description: 'Filtros (mesmo formato da camada); vazio = todos os registros' })
+  @IsArray()
+  filters: unknown[];
+
+  @ApiProperty({ example: { medicao: 'Estimado' } })
+  @IsObject()
+  changes: Record<string, unknown>;
+}

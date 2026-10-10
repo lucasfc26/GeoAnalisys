@@ -31,6 +31,7 @@ import {
   LookupDto,
   QueryDto,
   RecordsDto,
+  ReplaceDto,
   SearchQueryDto,
   SelectionDto,
   SummaryDto,
@@ -143,6 +144,12 @@ export class PointsController {
   @ApiOperation({ summary: 'Edição em massa (transação)' })
   bulkUpdate(@Body() dto: BulkUpdateDto, @CurrentUser() user: string) {
     return this.points.bulkUpdate(dto.sourceId, dto.ids, dto.changes, user);
+  }
+
+  @Patch('replace')
+  @ApiOperation({ summary: 'Substituição: mesmo valor em todos os registros filtrados (transação)' })
+  replace(@Body() dto: ReplaceDto, @CurrentUser() user: string) {
+    return this.points.replaceFiltered(dto.sourceId, parseFilters(dto.filters), dto.changes, user);
   }
 
   @Post('translate')

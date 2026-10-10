@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { Download, Filter, PanelRight, RefreshCw, Settings2 } from 'lucide-react';
 import { useActiveSource, useInvalidatePoints } from '@/hooks/useSourceData';
+import { layerName } from '@/lib/layers';
 import { healthService } from '@/services/sources';
 import { useAppStore } from '@/stores/appStore';
 import { SearchBox } from './SearchBox';
@@ -39,12 +40,13 @@ export function TopBar() {
   const setPanelOpen = useAppStore((s) => s.setPanelOpen);
   const panelOpen = useAppStore((s) => s.panelOpen);
   const filters = useAppStore((s) => s.filters);
+  const layers = useAppStore((s) => s.layers);
   const invalidate = useInvalidatePoints();
 
   return (
-    <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 bg-slate-900 px-3 py-2 text-white shadow-md sm:h-14 sm:flex-nowrap sm:py-0">
+    <header className="tone-fixed flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 bg-slate-900 px-3 py-2 text-white shadow-md sm:h-14 sm:flex-nowrap sm:py-0">
       <div className="flex items-center gap-2">
-        <img src="/favicon.svg" alt="" className="size-7" />
+        <img src="/logo.png" alt="" className="size-7 rounded-md ring-1 ring-slate-400/45" />
         <span className="hidden font-semibold tracking-tight sm:inline">GeoAnalisys</span>
       </div>
 
@@ -62,7 +64,10 @@ export function TopBar() {
         <option value="">{sources.isLoading ? 'Carregando…' : 'Camada ativa…'}</option>
         {sources.data?.map((s) => (
           <option key={s.id} value={s.id}>
-            {s.name}
+            {layerName(
+              layers.find((l) => l.sourceId === s.id),
+              s,
+            )}
           </option>
         ))}
         <option value="__new">+ Configurar fontes…</option>

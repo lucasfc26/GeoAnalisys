@@ -406,9 +406,7 @@ function LabelTemplates({
           <Button
             size="sm"
             icon={<Plus className="size-3.5" />}
-            onClick={() =>
-              setEditing({ mode: 'new', name: `Template ${templates.length + 1}` })
-            }
+            onClick={() => setEditing({ mode: 'new', name: `Template ${templates.length + 1}` })}
             title="Salva a configuração atual como um novo template"
           >
             Novo

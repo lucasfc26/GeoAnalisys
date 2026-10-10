@@ -1,19 +1,15 @@
 import { useEffect } from 'react';
+import { comboOf, shortcutFor } from '@/lib/shortcuts';
 import { selectedIdsOf, useAppStore } from '@/stores/appStore';
-import type { Tool, TransformMode } from '@/types';
+import type { TransformMode } from '@/types';
 
-const KEY_TOOL: Record<string, Tool> = {
-  n: 'pan',
-  s: 'select',
-  m: 'multi',
-  r: 'rectangle',
-  p: 'polygon',
-  a: 'add',
-  i: 'measure',
-  v: 'streetview',
-};
+/** Teclas que não digitam texto: valem também com o foco num campo. */
+const SAFE_WHILE_TYPING = /^(F\d{1,2}|(Ctrl|Alt)\+.+)$/;
 
-/** Atalhos de teclado das ferramentas (ignorados enquanto digita ou com diálogo aberto). */
+/**
+ * Atalhos de teclado dos botões, com as teclas escolhidas em Sobre › Atalhos (ignorados enquanto
+ * digita ou com diálogo aberto).
+ */
 export function useShortcuts(actions: {
   center: () => void;
   zoom: (d: number) => void;
@@ -24,42 +20,66 @@ export function useShortcuts(actions: {
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement;
+      const combo = comboOf(e);
+      const id = combo && shortcutFor(combo);
+      if (!id) return;
+      const typing = !!(e.target as HTMLElement).closest(
+        'input, textarea, select, [contenteditable="true"]',
+      );
+      // "Selecionar por valor" (F3) também abre com o foco num campo, em vez da busca do navegador.
+      if (typing && !(id === 'search' && SAFE_WHILE_TYPING.test(combo))) return;
       const s = useAppStore.getState();
-      // F3 (também com o foco num campo): nova janela "Selecionar por valor" em vez da busca do navegador.
-      if (e.key === 'F3' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        if (!s.sourceId || Object.values(s.dialogs).some(Boolean)) return;
-        e.preventDefault();
-        // Sempre abre mais uma janela, para a camada ativa (as já abertas continuam).
-        s.openSearchWindow(s.sourceId);
-        return;
-      }
-      if (el.closest('input, textarea, select, [contenteditable="true"]')) return;
       if (!s.sourceId || Object.values(s.dialogs).some(Boolean)) return;
-      // Ctrl+C: copia os pontos selecionados (cabeçalho + valores) para colar no Excel — exceto
-      // quando há texto selecionado na página (aí vale a cópia normal do navegador).
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'c') {
-        if (window.getSelection()?.toString()) return;
-        const ids = selectedIdsOf(s.selection);
-        if (!ids.length) return;
-        e.preventDefault();
-        actions.copy(s.sourceId, ids);
-        return;
+
+      switch (id) {
+        case 'search':
+          // Sempre abre mais uma janela, para a camada ativa (as já abertas continuam).
+          s.openSearchWindow(s.sourceId);
+          break;
+        case 'copy': {
+          // Copia os pontos selecionados (cabeçalho + valores) para colar no Excel — exceto quando há
+          // texto selecionado na página (aí vale a cópia normal do navegador).
+          if (window.getSelection()?.toString()) return;
+          const ids = selectedIdsOf(s.selection);
+          if (!ids.length) return;
+          actions.copy(s.sourceId, ids);
+          break;
+        }
+        case 'clear':
+          if (s.transform) s.setTransform(null);
+          // No polígono e na régua, Esc cancela o desenho (tratado pelas próprias ferramentas).
+          else if (combo !== 'Esc' || (s.tool !== 'polygon' && s.tool !== 'measure'))
+            s.clearSelection();
+          break;
+        // Sempre abre mais uma janela do modo lista, para a camada ativa (as já abertas continuam).
+        case 'list':
+          s.openListWindow(s.sourceId);
+          break;
+        case 'move':
+          actions.transform('move');
+          break;
+        case 'duplicate':
+          actions.transform('copy');
+          break;
+        case 'center':
+          actions.center();
+          break;
+        case 'zoomIn':
+          actions.zoom(1);
+          break;
+        case 'zoomOut':
+          actions.zoom(-1);
+          break;
+        case 'edit':
+          actions.edit();
+          break;
+        case 'remove':
+          actions.remove();
+          break;
+        default:
+          s.setTool(id);
       }
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const k = e.key.toLowerCase();
-      if (KEY_TOOL[k]) s.setTool(KEY_TOOL[k]);
-      else if (k === 'escape' && s.transform) s.setTransform(null);
-      // No polígono e na régua, Esc cancela o desenho (tratado pelas próprias ferramentas).
-      else if (k === 'escape' && s.tool !== 'polygon' && s.tool !== 'measure') s.clearSelection();
-      else if (k === 'l') s.setListMode(!s.listMode);
-      else if (k === 'g') actions.transform('move');
-      else if (k === 'd') actions.transform('copy');
-      else if (k === 'c') actions.center();
-      else if (k === '+' || k === '=') actions.zoom(1);
-      else if (k === '-') actions.zoom(-1);
-      else if (k === 'e') actions.edit();
-      else if (k === 'delete') actions.remove();
+      e.preventDefault();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

@@ -152,7 +152,17 @@ export interface BoundaryLayer {
   visible: boolean;
   features: number;
   bounds: Bounds | null;
+  /** Arquivo(s) de origem (caminho no programa desktop; só o nome no navegador) */
+  origin?: string[];
 }
+
+/**
+ * Árvore do painel de camadas: camadas soltas e grupos (pastas) com camadas. A ordem da árvore
+ * achatada é a ordem de desenho (`layers`, índice 0 = topo).
+ */
+export type LayerTreeNode =
+  | { kind: 'layer'; id: string }
+  | { kind: 'group'; id: string; name: string; expanded: boolean; children: string[] };
 
 /** Mover ou duplicar os pontos selecionados arrastando-os no mapa. */
 export type TransformMode = 'move' | 'copy';
@@ -298,6 +308,8 @@ export interface LabelTemplate {
 /** Configuração visual de uma camada (fonte de dados) no mapa. */
 export interface LayerStyle {
   sourceId: string;
+  /** Nome exibido no painel (só visual; a tabela e a fonte não mudam). Vazio = nome da fonte. */
+  name?: string;
   visible: boolean;
   expanded: boolean;
   /** Símbolo único (e padrão das categorias) */

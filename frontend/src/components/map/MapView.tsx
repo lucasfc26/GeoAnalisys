@@ -219,6 +219,7 @@ export default function MapView() {
   // Enquanto move/duplica, as ferramentas de seleção/desenho ficam suspensas.
   const tool = useAppStore((s) => (s.transform ? 'pan' : s.tool));
   const searchWindows = useAppStore((s) => s.searchWindows);
+  const listWindows = useAppStore((s) => s.listWindows);
   const selection = useAppStore((s) => s.selection);
   const setSelection = useAppStore((s) => s.setSelection);
   const toggleGroup = useAppStore((s) => s.toggleGroup);
@@ -491,8 +492,10 @@ export default function MapView() {
         onMapClick={onMapClick}
       />
       {tool === 'measure' && <MeasureController />}
-      {/* Lista vale para a camada ativa: trocar de camada recomeça. */}
-      <ListModePanel key={sourceId ?? 'none'} />
+      {/* Uma janela do modo lista por L/clique, cada uma presa à camada (mantém o estado). */}
+      {listWindows.map((w, i) => (
+        <ListModePanel key={w.id} windowId={w.id} sourceId={w.sourceId} index={i} />
+      ))}
       {/* Uma janela por F3/clique, cada uma presa à camada em que foi aberta. */}
       {searchWindows.map((w, i) => (
         <SelectByValuePanel
@@ -512,11 +515,11 @@ export default function MapView() {
       <div
         ref={tipRef}
         hidden
-        className="pointer-events-none absolute z-20 max-w-xs truncate rounded bg-slate-900/90 px-2 py-1 text-xs text-white shadow-lg"
+        className="pointer-events-none absolute z-20 max-w-xs truncate tone-fixed rounded bg-slate-900/90 px-2 py-1 text-xs text-white shadow-lg"
       />
 
       {hint && (
-        <div className="pointer-events-none absolute top-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-slate-900/85 px-3.5 py-1.5 text-xs text-white shadow-lg max-sm:top-14 max-sm:max-w-[90%] max-sm:text-center">
+        <div className="pointer-events-none absolute top-3 left-1/2 z-10 -translate-x-1/2 tone-fixed rounded-full bg-slate-900/85 px-3.5 py-1.5 text-xs text-white shadow-lg max-sm:top-14 max-sm:max-w-[90%] max-sm:text-center">
           {hint}
         </div>
       )}

@@ -82,14 +82,15 @@ export const pointsService = {
     api.post<QueryResponse>('/points/query', { sourceId, filters }),
 
   lookup: (sourceId: string, column: string, values: string[]) =>
-    api.post<{ column: string; items: { value: string; groups: SelectedGroup[] }[] }>(
-      '/points/lookup',
-      {
-        sourceId,
-        column,
-        values,
-      },
-    ),
+    api.post<{
+      column: string;
+      /** `removed`: não está na tabela, mas foi removido (Tabela de Alterações), com a justificativa */
+      items: { value: string; groups: SelectedGroup[]; removed?: { observation: string | null } }[];
+    }>('/points/lookup', {
+      sourceId,
+      column,
+      values,
+    }),
 
   /** Resumo por uma coluna (padrão: categoria) ou pela combinação de várias (valores concatenados). */
   summary: (sourceId: string, ids: string[], columns?: string[]) =>
@@ -112,6 +113,16 @@ export const pointsService = {
 
   bulkUpdate: (sourceId: string, ids: string[], changes: Record<string, unknown>) =>
     api.patch<{ updated: number }>('/points/bulk', { sourceId, ids, changes }),
+
+  /** Registros que atendem aos filtros (com ou sem coordenada). */
+  count: (sourceId: string, filters: FilterDef[], signal?: AbortSignal) =>
+    api
+      .get<{ total: number }>(`/points${qs({ sourceId, filters: f(filters), pageSize: 1 })}`, signal)
+      .then((r) => r.total),
+
+  /** Substituição: mesmo valor em todos os registros filtrados. */
+  replace: (sourceId: string, filters: FilterDef[], changes: Record<string, unknown>) =>
+    api.patch<{ updated: number }>('/points/replace', { sourceId, filters, changes }),
 
   translate: (
     sourceId: string,

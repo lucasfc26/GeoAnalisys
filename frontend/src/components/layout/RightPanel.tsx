@@ -176,7 +176,7 @@ export function RightPanel() {
     <>
       {open && (
         <div
-          className="fixed inset-0 z-30 bg-slate-900/30 lg:hidden"
+          className="fixed inset-0 z-30 bg-ink/30 lg:hidden"
           onClick={() => setPanelOpen(false)}
           aria-hidden
         />

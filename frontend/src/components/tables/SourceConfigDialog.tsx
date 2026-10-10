@@ -518,9 +518,19 @@ export default function SourceConfigDialog() {
   const sources = useSources();
   const [mode, setMode] = useState<{ kind: 'list' } | { kind: 'form'; editing: DataSource | null }>({ kind: 'list' });
 
+  /** Aberto pelo botão direito de uma camada (Editar fonte) ou por Adicionar › Banco de dados */
+  const direct = open === 'new' || typeof open === 'object';
+  const editId = typeof open === 'object' ? open.edit : null;
+  const editSource = editId ? sources.data?.find((s) => s.id === editId) : undefined;
+
   useEffect(() => {
-    if (open) setMode(sources.data?.length ? { kind: 'list' } : { kind: 'form', editing: null });
-  }, [open, sources.data?.length]);
+    if (!open) return;
+    if (editId) {
+      if (editSource) setMode({ kind: 'form', editing: editSource });
+      return;
+    }
+    setMode(open !== 'new' && sources.data?.length ? { kind: 'list' } : { kind: 'form', editing: null });
+  }, [open, editId, editSource, sources.data?.length]);
 
   if (!open) return null;
   return (
@@ -537,7 +547,7 @@ export default function SourceConfigDialog() {
         <SourceForm
           key={mode.editing?.id ?? 'new'}
           editing={mode.editing}
-          onDone={() => (sources.data?.length ? setMode({ kind: 'list' }) : closeDialog('source'))}
+          onDone={() => (!direct && sources.data?.length ? setMode({ kind: 'list' }) : closeDialog('source'))}
         />
       )}
     </Dialog>

@@ -20,7 +20,6 @@ const fmtCoord = (n: number) => n.toFixed(7).replace(/\.?0+$/, '');
  */
 export function SearchBox() {
   const sourceId = useAppStore((s) => s.sourceId);
-  const filters = useAppStore((s) => s.filters);
   const setSelection = useAppStore((s) => s.setSelection);
   const openRecord = useAppStore((s) => s.openRecord);
   const focusMap = useAppStore((s) => s.focusMap);
@@ -76,18 +75,13 @@ export function SearchBox() {
     focusMap({ center: { lat: coord.lat, lng: coord.lng }, zoom: 19, flash: true });
   };
 
-  const pick = async (r: SearchResult) => {
+  // Seleciona só o registro pesquisado, mesmo que outros estejam na mesma coordenada.
+  const pick = (r: SearchResult) => {
     setOpen(false);
     if (!sourceId || r.lat === null || r.lng === null) return;
     focusMap({ center: { lat: r.lat, lng: r.lng }, zoom: 19 });
-    try {
-      const at = await pointsService.at(sourceId, r.x, r.y, filters, true);
-      const ids = at.ids.includes(r.id) ? at.ids : [r.id, ...at.ids];
-      setSelection([{ key: r.key, x: r.x, y: r.y, lat: r.lat, lng: r.lng, ids }]);
-      openRecord(r.key, r.id);
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
+    setSelection([{ key: r.key, x: r.x, y: r.y, lat: r.lat, lng: r.lng, ids: [r.id] }]);
+    openRecord(r.key, r.id);
   };
 
   return (
@@ -125,7 +119,7 @@ export function SearchBox() {
         )
       )}
       {open && (coord || (debounced.length >= 2 && !results.isFetching && results.data)) && (
-        <div className="absolute top-full right-0 left-0 z-40 mt-1 overflow-hidden rounded-md border border-slate-200 bg-white shadow-xl">
+        <div className="absolute top-full right-0 left-0 z-40 mt-1 overflow-hidden rounded-md border border-slate-200 bg-white shadow-xl tone-auto">
           {coord && (
             <button
               type="button"

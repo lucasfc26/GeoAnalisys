@@ -1,5 +1,5 @@
 // Ponte segura entre as janelas (conexão e sistema) e o processo principal (sem acesso direto ao Node).
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('geoanalisys', {
   saved: () => ipcRenderer.invoke('saved:list'),
@@ -20,5 +20,19 @@ contextBridge.exposeInMainWorld('geoanalisys', {
     onNew: (fn) => ipcRenderer.on('project:new', (_e, msg) => fn(msg)),
     onSave: (fn) => ipcRenderer.on('project:save', () => fn()),
     onFlush: (fn) => ipcRenderer.on('project:flush', () => fn()),
+  },
+  // Caminho no disco de um arquivo escolhido (Camadas > Sobre mostra a origem dos limites)
+  files: {
+    pathOf: (file) => {
+      try {
+        return webUtils.getPathForFile(file) || null;
+      } catch {
+        return null;
+      }
+    },
+  },
+  // Menus Ferramentas e Sobre (abrem diálogos do sistema)
+  tools: {
+    onOpen: (fn) => ipcRenderer.on('tool:open', (_e, name) => fn(name)),
   },
 });

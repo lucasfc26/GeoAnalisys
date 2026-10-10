@@ -143,6 +143,28 @@ export class ChangesService {
     }
   }
 
+  /**
+   * Pontos removidos (DELETE na Tabela de Alterações do projeto aberto) entre os ids informados:
+   * id → justificativa da remoção.
+   */
+  async removed(sourceId: string, recordIds: string[]): Promise<Map<string, string | null>> {
+    const out = new Map<string, string | null>();
+    const project = projectFilter('project_id', 3);
+    for (let i = 0; i < recordIds.length; i += CHUNK) {
+      const rows = await this.prisma.$queryRawUnsafe<
+        { record_id: string; observation: string | null }[]
+      >(
+        `SELECT record_id, observation FROM alteracoes
+          WHERE source_id = $1 AND action = 'DELETE' AND record_id = ANY($2::text[]) AND ${project.sql}`,
+        sourceId,
+        recordIds.slice(i, i + CHUNK),
+        ...project.params,
+      );
+      for (const r of rows) out.set(r.record_id, r.observation);
+    }
+    return out;
+  }
+
   private plain(id: string, action: ChangeAction, observation?: string | null): PutRow {
     return {
       record_id: id,

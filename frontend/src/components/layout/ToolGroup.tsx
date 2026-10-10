@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react';
+import { useShortcutKeys } from '@/lib/shortcuts';
 import type { Tool } from '@/types';
 import { HoldMenuButton, type HoldMenuItem } from '../ui/HoldMenuButton';
 
+/** Ferramenta; a tecla de atalho vem de Sobre › Atalhos (mesmo nome da ferramenta). */
 export interface ToolDef {
   tool: Tool;
   label: string;
-  shortcut: string;
   icon: ReactNode;
 }
 
@@ -31,11 +32,12 @@ export function ToolGroup({
   /** Ações extras no fim da lista (ex.: limpar seleção) */
   extra?: HoldMenuItem[];
 }) {
+  const keyOf = useShortcutKeys();
   const shown = tools.find((t) => t.tool === current) ?? tools.find((t) => t.tool === last) ?? tools[0];
   return (
     <HoldMenuButton
       label={shown.label}
-      shortcut={shown.shortcut}
+      shortcut={keyOf(shown.tool)}
       icon={shown.icon}
       active={tools.some((t) => t.tool === current)}
       disabled={disabled}
@@ -46,7 +48,7 @@ export function ToolGroup({
           key: t.tool,
           label: t.label,
           icon: t.icon,
-          shortcut: t.shortcut,
+          shortcut: keyOf(t.tool),
           checked: t.tool === shown.tool,
           onSelect: () => onPick(t.tool),
         })),

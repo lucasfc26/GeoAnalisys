@@ -32,6 +32,8 @@ export interface ExportRequest {
   decimal?: '.' | ',';
   /** Colunas na ordem do arquivo (chaves de `exportFields`); ausente = todas, na ordem padrão */
   columns?: string[];
+  /** Nome alternativo no cabeçalho do arquivo, por chave de coluna */
+  headers?: Record<string, string>;
 }
 
 export type PreviewRequest = Omit<ExportRequest, 'format' | 'delimiter' | 'decimal'>;
@@ -77,18 +79,59 @@ export function exportFields(ctx: SourceContext): ExportField[] {
   ];
 }
 
-/** Campos pedidos, na ordem pedida (repetidos são ignorados); sem lista, todos na ordem padrão. */
-export function pickFields(ctx: SourceContext, columns?: string[]): ExportField[] {
-  const all = exportFields(ctx);
-  if (!columns) return all;
-  const byKey = new Map(all.map((f) => [f.key, f]));
-  const out: ExportField[] = [];
-  for (const key of new Set(columns)) {
-    const f = byKey.get(key);
-    if (!f) throw new BadRequestException(`Coluna desconhecida: ${key}`);
-    out.push(f);
+export const MAX_HEADER_LENGTH = 100;
+
+/**
+ * Nomes alternativos { coluna: nome no arquivo }: só textos (sem espaços nas pontas), vazios
+ * descartados. Sem nenhum nome, undefined.
+ */
+export function cleanHeaders(raw: unknown): Record<string, string> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new BadRequestException('headers deve ser um objeto { coluna: nome }');
   }
-  if (!out.length) throw new BadRequestException('Escolha ao menos uma coluna para exportar');
+  const out: Record<string, string> = {};
+  for (const [key, v] of Object.entries(raw)) {
+    if (typeof v !== 'string') throw new BadRequestException(`Nome inválido para a coluna ${key}`);
+    const name = v.trim();
+    if (name.length > MAX_HEADER_LENGTH) {
+      throw new BadRequestException(
+        `Nome da coluna ${key} com mais de ${MAX_HEADER_LENGTH} caracteres`,
+      );
+    }
+    if (name) out[key] = name;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Campos pedidos, na ordem pedida (repetidos são ignorados); sem lista, todos na ordem padrão.
+ * `headers` troca o cabeçalho das colunas renomeadas (os nomes no arquivo não podem se repetir).
+ */
+export function pickFields(
+  ctx: SourceContext,
+  columns?: string[],
+  headers?: Record<string, string>,
+): ExportField[] {
+  const all = exportFields(ctx);
+  let out = all;
+  if (columns) {
+    const byKey = new Map(all.map((f) => [f.key, f]));
+    out = [];
+    for (const key of new Set(columns)) {
+      const f = byKey.get(key);
+      if (!f) throw new BadRequestException(`Coluna desconhecida: ${key}`);
+      out.push(f);
+    }
+    if (!out.length) throw new BadRequestException('Escolha ao menos uma coluna para exportar');
+  }
+  if (!headers) return out;
+  out = out.map((f) => (headers[f.key] ? { ...f, header: headers[f.key] } : f));
+  const count = new Map<string, number>();
+  for (const f of out)
+    count.set(f.header.toLowerCase(), (count.get(f.header.toLowerCase()) ?? 0) + 1);
+  const dup = out.find((f) => headers[f.key] && count.get(f.header.toLowerCase())! > 1);
+  if (dup) throw new BadRequestException(`Nome de coluna repetido no arquivo: ${dup.header}`);
   return out;
 }
 
@@ -109,7 +152,7 @@ export class ExportService {
     if (req.scope === 'selected' && !req.ids?.length) {
       throw new BadRequestException('Nenhum registro selecionado para exportar');
     }
-    const fields = pickFields(ctx, req.columns);
+    const fields = pickFields(ctx, req.columns, req.headers);
     const started = Date.now();
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
     const base = `${ctx.source.tableName}_${req.scope}_${stamp}`.replace(/[^\w.\-]+/g, '_');
@@ -126,10 +169,11 @@ export class ExportService {
     });
 
     const headers = fields.map((f) => f.header);
-    // GeoJSON/KML sem modelo: todos os campos com o nome original; com modelo: os campos escolhidos.
+    // GeoJSON/KML sem modelo: todos os campos com o nome original; com modelo (ou nomes
+    // alternativos): os campos escolhidos, com os cabeçalhos do arquivo.
     const plainProps = ctx.columns.filter((c) => c.kind !== 'geometry');
     const propsOf = (r: ExportRow): [string, unknown][] =>
-      req.columns
+      req.columns || req.headers
         ? fields.map((f) => [f.header, f.value(r)])
         : plainProps.map((c) => [c.name, r.data[c.name]]);
     const categories = new Map<string, number>();
@@ -280,7 +324,7 @@ export class ExportService {
         ['Definição proj4', crs.proj4],
         ['Escopo', req.scope],
         ['Filtros', req.scope === 'all' ? '-' : JSON.stringify(req.filters)],
-        ['Colunas exportadas', req.columns ? headers.join(', ') : 'Todas'],
+        ['Colunas exportadas', req.columns || req.headers ? headers.join(', ') : 'Todas'],
         ['Total exportado', total],
         ['Gerado em', new Date().toISOString()],
       ].forEach((r) => meta.addRow(r).commit());
@@ -301,7 +345,7 @@ export class ExportService {
   /** Primeiras linhas do arquivo (mesmos registros, ordem e colunas da exportação). */
   async preview(req: PreviewRequest) {
     const ctx = await this.sources.context(req.sourceId);
-    const fields = pickFields(ctx, req.columns);
+    const fields = pickFields(ctx, req.columns, req.headers);
     const filters = req.scope === 'all' ? [] : req.filters;
     let raw: Record<string, unknown>[];
     let total: number | null = null;

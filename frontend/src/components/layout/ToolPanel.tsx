@@ -28,6 +28,7 @@ import { useActiveSource, useInvalidatePoints, useSelectedIds } from '@/hooks/us
 import { errorMessage } from '@/lib/api';
 import { copyTable } from '@/lib/clipboard';
 import { useMap } from '@/lib/mapContext';
+import { useShortcutKeys } from '@/lib/shortcuts';
 import { fetchSelectedTable } from '@/services/export';
 import { pointsService } from '@/services/points';
 import { fmtInt } from '@/utils/format';
@@ -42,7 +43,6 @@ import { ToolGroup, type ToolDef } from './ToolGroup';
 const PAN: ToolDef = {
   tool: 'pan',
   label: 'Navegar',
-  shortcut: 'N',
   icon: <Hand className="size-5" />,
 };
 
@@ -51,25 +51,21 @@ const SELECTION_TOOLS: ToolDef[] = [
   {
     tool: 'select',
     label: 'Selecionar ponto',
-    shortcut: 'S',
     icon: <MousePointer2 className="size-5" />,
   },
   {
     tool: 'multi',
     label: 'Seleção múltipla',
-    shortcut: 'M',
     icon: <MousePointerClick className="size-5" />,
   },
   {
     tool: 'rectangle',
     label: 'Seleção por retângulo',
-    shortcut: 'R',
     icon: <BoxSelect className="size-5" />,
   },
   {
     tool: 'polygon',
     label: 'Seleção por polígono',
-    shortcut: 'P',
     icon: <Pentagon className="size-5" />,
   },
 ];
@@ -78,19 +74,16 @@ const OTHER_TOOLS: ToolDef[] = [
   {
     tool: 'measure',
     label: 'Medir distância (régua)',
-    shortcut: 'I',
     icon: <Ruler className="size-5" />,
   },
   {
     tool: 'streetview',
     label: 'Abrir no Street View',
-    shortcut: 'V',
     icon: <PersonStanding className="size-5" />,
   },
   {
     tool: 'add',
     label: 'Adicionar ponto pelo mapa',
-    shortcut: 'A',
     icon: <MapPinPlus className="size-5" />,
   },
 ];
@@ -191,10 +184,10 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
   const setTool = useAppStore((s) => s.setTool);
   const transform = useAppStore((s) => s.transform);
   const lastSelectTool = useAppStore((s) => s.lastSelectTool);
-  const listMode = useAppStore((s) => s.listMode);
-  const setListMode = useAppStore((s) => s.setListMode);
+  const listOpen = useAppStore((s) => s.listWindows.length > 0);
   const searchOpen = useAppStore((s) => s.searchWindows.length > 0);
   const a = useToolActions();
+  const keyOf = useShortcutKeys();
   const vertical = orientation === 'vertical';
   // Régua e Street View não dependem de uma camada.
   const needsSource = (t: ToolDef) =>
@@ -203,7 +196,7 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
     <IconButton
       key={t.tool}
       label={t.label}
-      shortcut={t.shortcut}
+      shortcut={keyOf(t.tool)}
       active={!transform && tool === t.tool}
       disabled={!a.hasSource && needsSource(t)}
       onClick={() => setTool(t.tool)}
@@ -235,7 +228,7 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
       <Divider vertical={!vertical} />
       <IconButton
         label="Mover selecionados"
-        shortcut="G"
+        shortcut={keyOf('move')}
         active={transform === 'move'}
         disabled={!a.hasSelection}
         onClick={() => a.transform('move')}
@@ -244,7 +237,7 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
       </IconButton>
       <IconButton
         label="Duplicar selecionados"
-        shortcut="D"
+        shortcut={keyOf('duplicate')}
         active={transform === 'copy'}
         disabled={!a.hasSelection}
         onClick={() => a.transform('copy')}
@@ -260,7 +253,7 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
       </IconButton>
       <IconButton
         label="Excluir selecionados"
-        shortcut="Del"
+        shortcut={keyOf('remove')}
         disabled={!a.hasSelection}
         onClick={a.remove}
       >
@@ -269,16 +262,20 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
       <Divider vertical={!vertical} />
       <IconButton
         label="Modo lista (percorrer valores)"
-        shortcut="L"
-        active={listMode}
+        shortcut={keyOf('list')}
+        active={listOpen}
         disabled={!a.hasSource}
-        onClick={() => setListMode(!listMode)}
+        onClick={() => {
+          // Sempre abre mais uma janela, para a camada ativa.
+          const s = useAppStore.getState();
+          if (s.sourceId) s.openListWindow(s.sourceId);
+        }}
       >
         <ListOrdered className="size-5" />
       </IconButton>
       <IconButton
         label="Selecionar por valor (atributos)"
-        shortcut="F3"
+        shortcut={keyOf('search')}
         active={searchOpen}
         disabled={!a.hasSource}
         onClick={() => {
@@ -291,7 +288,7 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
       </IconButton>
       <HoldMenuButton
         label={a.hasSelection ? 'Centralizar nos selecionados' : 'Centralizar na tabela atual'}
-        shortcut="C"
+        shortcut={keyOf('center')}
         icon={<Crosshair className="size-5" />}
         disabled={!a.hasSource}
         orientation={vertical ? 'vertical' : 'horizontal'}
@@ -318,10 +315,10 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
           },
         ]}
       />
-      <IconButton label="Aproximar" shortcut="+" onClick={() => a.zoom(1)}>
+      <IconButton label="Aproximar" shortcut={keyOf('zoomIn')} onClick={() => a.zoom(1)}>
         <ZoomIn className="size-5" />
       </IconButton>
-      <IconButton label="Afastar" shortcut="-" onClick={() => a.zoom(-1)}>
+      <IconButton label="Afastar" shortcut={keyOf('zoomOut')} onClick={() => a.zoom(-1)}>
         <ZoomOut className="size-5" />
       </IconButton>
       <Divider vertical={!vertical} />

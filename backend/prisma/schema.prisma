@@ -45,6 +45,8 @@ model ExportTemplate {
   name      String
   /// Colunas na ordem do arquivo; "@lat" e "@lng" = latitude/longitude calculadas (WGS84)
   columns   String[]   @default([])
+  /// Nome alternativo no cabeçalho do arquivo, por coluna: { "ID": "idd" }
+  headers   Json       @default("{}")
   createdAt DateTime   @default(now()) @map("created_at")
   updatedAt DateTime   @updatedAt @map("updated_at")
 

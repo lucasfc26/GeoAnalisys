@@ -14,6 +14,8 @@ export interface ExportOptions {
   decimal: '.' | ',';
   /** Colunas na ordem do arquivo; ausente = todas, na ordem padrão */
   columns?: string[];
+  /** Nome alternativo no cabeçalho do arquivo, por coluna */
+  headers?: Record<string, string>;
 }
 
 /** Chaves das colunas calculadas pelo backend (latitude/longitude em WGS84). */
@@ -25,6 +27,8 @@ export interface ExportTemplate {
   sourceId: string;
   name: string;
   columns: string[];
+  /** Nome alternativo no cabeçalho, por coluna */
+  headers: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -53,13 +57,16 @@ export function triggerDownload(href: string, filename?: string) {
 }
 
 /** Corpo comum de exportação/prévia (filtros e IDs só quando o escopo usa). */
-function scopeBody(o: Pick<ExportOptions, 'sourceId' | 'scope' | 'filters' | 'ids' | 'columns'>) {
+function scopeBody(
+  o: Pick<ExportOptions, 'sourceId' | 'scope' | 'filters' | 'ids' | 'columns' | 'headers'>,
+) {
   return {
     sourceId: o.sourceId,
     scope: o.scope,
     filters: o.scope === 'all' ? undefined : o.filters,
     ids: o.scope === 'selected' ? o.ids : undefined,
     columns: o.columns,
+    headers: o.headers,
   };
 }
 
@@ -79,6 +86,7 @@ export async function exportData(o: ExportOptions): Promise<void> {
       scope: o.scope,
       filters: o.scope === 'filtered' && o.filters.length ? o.filters : undefined,
       columns: o.columns,
+      headers: o.headers,
     })}`;
     triggerDownload(url);
     return;
@@ -136,13 +144,20 @@ export interface GeoJsonPoint {
 }
 
 export const exportService = {
-  preview: (o: Pick<ExportOptions, 'sourceId' | 'scope' | 'filters' | 'ids' | 'columns'>) =>
-    api.post<ExportPreview>('/export/preview', scopeBody(o)),
+  preview: (
+    o: Pick<ExportOptions, 'sourceId' | 'scope' | 'filters' | 'ids' | 'columns' | 'headers'>,
+  ) => api.post<ExportPreview>('/export/preview', scopeBody(o)),
   templates: (sourceId: string) =>
     api.get<ExportTemplate[]>(`/export/templates${qs({ sourceId })}`),
-  createTemplate: (t: { sourceId: string; name: string; columns: string[] }) =>
-    api.post<ExportTemplate>('/export/templates', t),
-  updateTemplate: (id: string, patch: { name?: string; columns?: string[] }) =>
-    api.patch<ExportTemplate>(`/export/templates/${id}`, patch),
+  createTemplate: (t: {
+    sourceId: string;
+    name: string;
+    columns: string[];
+    headers?: Record<string, string>;
+  }) => api.post<ExportTemplate>('/export/templates', t),
+  updateTemplate: (
+    id: string,
+    patch: { name?: string; columns?: string[]; headers?: Record<string, string> },
+  ) => api.patch<ExportTemplate>(`/export/templates/${id}`, patch),
   removeTemplate: (id: string) => api.delete<{ deleted: boolean }>(`/export/templates/${id}`),
 };

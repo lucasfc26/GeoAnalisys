@@ -8,6 +8,10 @@
   --color-accent-600: #0d9488;
   --color-accent-700: #0f766e;
   --color-accent-800: #115e59;
+  /* Cores fixas (iguais nos dois temas) */
+  --color-ink: #0f172a;
+  --color-accent-hover: #0f766e;
+  --color-danger-hover: #b91c1c;
 }
 
 html,
@@ -24,7 +28,85 @@ body {
 /* Scrollbars discretas nos painéis */
 .scroll-thin {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-color: var(--scrollbar, #cbd5e1) transparent;
+}
+
+/*
+ * Tema escuro: escolhido em Sobre > Tema no programa desktop (nativeTheme), que muda o
+ * prefers-color-scheme. As cores do Tailwind são remapeadas (cinzas invertidos, tons claros de
+ * destaque viram tons escuros), então os componentes não precisam de classes dark:.
+ * .tone-fixed: áreas que já são escuras (barra superior, dicas) mantêm as cores originais;
+ * .tone-auto: dentro delas, volta a seguir o tema (ex.: lista de resultados da busca).
+ */
+@media (prefers-color-scheme: dark) {
+  :root,
+  .tone-fixed .tone-auto {
+    color-scheme: dark;
+    --scrollbar: #3b4a63;
+    --color-white: #172033;
+    --color-slate-50: #1c2638;
+    --color-slate-100: #243049;
+    --color-slate-200: #2c3a52;
+    --color-slate-300: #3b4a63;
+    --color-slate-400: #7c8aa0;
+    --color-slate-500: #94a3b8;
+    --color-slate-600: #a9b6c8;
+    --color-slate-700: #cbd5e1;
+    --color-slate-800: #e2e8f0;
+    --color-slate-900: #f1f5f9;
+    --color-slate-950: #f8fafc;
+    --color-accent-50: #0f2f2e;
+    --color-accent-100: #134e4a;
+    --color-accent-700: #2dd4bf;
+    --color-accent-800: #5eead4;
+    --color-red-50: #3a1a1f;
+    --color-red-100: #4c1d24;
+    --color-red-200: #7f1d1d;
+    --color-red-600: #ef4444;
+    --color-red-700: #f87171;
+    --color-red-800: #fca5a5;
+    --color-red-900: #fecaca;
+    --color-amber-50: #33270f;
+    --color-amber-100: #453310;
+    --color-amber-200: #78350f;
+    --color-amber-700: #fbbf24;
+    --color-amber-800: #fcd34d;
+    --color-amber-900: #fde68a;
+    --color-emerald-50: #0f2e22;
+    --color-emerald-700: #34d399;
+    --color-emerald-800: #6ee7b7;
+    --color-sky-100: #0c3049;
+    --color-sky-700: #38bdf8;
+    --color-sky-800: #7dd3fc;
+  }
+
+  .tone-fixed {
+    color-scheme: light;
+    --scrollbar: #cbd5e1;
+    --color-white: #fff;
+    --color-slate-50: oklch(98.4% 0.003 247.858);
+    --color-slate-100: oklch(96.8% 0.007 247.896);
+    --color-slate-200: oklch(92.9% 0.013 255.508);
+    --color-slate-300: oklch(86.9% 0.022 252.894);
+    --color-slate-400: oklch(70.4% 0.04 256.788);
+    --color-slate-500: oklch(55.4% 0.046 257.417);
+    --color-slate-600: oklch(44.6% 0.043 257.281);
+    --color-slate-700: oklch(37.2% 0.044 257.287);
+    --color-slate-800: oklch(27.9% 0.041 260.031);
+    --color-slate-900: oklch(20.8% 0.042 265.755);
+    --color-slate-950: oklch(12.9% 0.042 264.695);
+  }
+
+  /* Select com fundo transparente abre a lista nativa em branco: as opções seguem o painel */
+  select :is(option, optgroup) {
+    background-color: var(--color-white);
+    color: var(--color-slate-800);
+  }
+
+  /* --color-white virou a cor dos painéis: texto branco (botões, dicas) continua branco */
+  :is(.text-white, .hover\:text-white:hover):not(.tone-fixed, .tone-fixed *) {
+    color: #fff;
+  }
 }
 
 @keyframes slide-in-right {
@@ -43,4 +125,9 @@ body {
 /* Remove o contorno de foco do Google Maps no container */
 .gm-style iframe + div {
   border: none !important;
+}
+
+/* Arrastando/redimensionando uma janela flutuante: iframes não capturam o mouse */
+.panel-dragging iframe {
+  pointer-events: none;
 }

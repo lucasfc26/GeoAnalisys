@@ -1,17 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import clsx from 'clsx';
-import {
-  ArrowDown,
-  ArrowUp,
-  FileJson,
-  FileSpreadsheet,
-  FileText,
-  Globe,
-  GripVertical,
-  Loader2,
-  Save,
-  Trash2,
-} from 'lucide-react';
+import { FileJson, FileSpreadsheet, FileText, Globe, Loader2, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useDebounce } from '@/hooks/useDebounce';
 import { useActiveSource, useSelectedIds, useSourceSchema } from '@/hooks/useSourceData';
@@ -25,17 +13,20 @@ import {
 } from '@/services/export';
 import { useAppStore } from '@/stores/appStore';
 import {
+  aliasesOf,
   defaultItems,
+  duplicateHeader,
   enabledKeys,
   exportColumns,
   isDefaultOrder,
   itemsFromTemplate,
-  moveItem,
+  sameAliases,
   sameKeys,
   type ColumnItem,
 } from '@/utils/exportColumns';
 import { fmtInt } from '@/utils/format';
 import { Button } from '../ui/Button';
+import { ColumnList } from '../ui/ColumnList';
 import { Dialog } from '../ui/Dialog';
 import { Input, Label, RadioCard as Radio, Select } from '../ui/Field';
 import { toast } from '../ui/Toaster';
@@ -68,7 +59,6 @@ export default function ExportDialog() {
   /** '' = padrão (todas as colunas) */
   const [templateId, setTemplateId] = useState('');
   const [items, setItems] = useState<ColumnItem[] | null>(null);
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
   /** Nome do novo modelo (null = campo fechado) */
   const [newName, setNewName] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -93,19 +83,33 @@ export default function ExportDialog() {
     if (items || !cols.length || !templates.data) return;
     const t = templates.data.find((x) => x.id === savedTemplateId);
     setTemplateId(t?.id ?? '');
-    setItems(t ? itemsFromTemplate(cols, t.columns) : defaultItems(cols));
+    setItems(t ? itemsFromTemplate(cols, t.columns, t.headers) : defaultItems(cols));
   }, [items, cols, templates.data, savedTemplateId]);
 
   const chosen = useMemo(() => (items ? enabledKeys(items) : []), [items]);
+  /** Nomes alternativos no cabeçalho ({ coluna: nome }) */
+  const headers = useMemo(() => (items ? aliasesOf(items) : undefined), [items]);
+  const duplicate = items ? duplicateHeader(items, colByKey) : null;
   const isDefault = !!items && isDefaultOrder(items, cols);
-  const dirty = template
-    ? !sameKeys(chosen, itemsFromTemplate(cols, template.columns).filter((i) => i.enabled).map((i) => i.key))
-    : !isDefault;
+  const templateItems = template && itemsFromTemplate(cols, template.columns, template.headers);
+  const dirty = templateItems
+    ? !sameKeys(chosen, enabledKeys(templateItems)) ||
+      !sameAliases(headers, aliasesOf(templateItems))
+    : !isDefault || !!headers;
   const columns = isDefault ? undefined : chosen;
 
   const previewColumns = useDebounce(columns, 300);
+  const previewHeaders = useDebounce(headers, 300);
   const preview = useQuery({
-    queryKey: ['export-preview', sourceId, scope, filters, scope === 'selected' ? ids : null, previewColumns],
+    queryKey: [
+      'export-preview',
+      sourceId,
+      scope,
+      filters,
+      scope === 'selected' ? ids : null,
+      previewColumns,
+      previewHeaders,
+    ],
     queryFn: () =>
       exportService.preview({
         sourceId: sourceId!,
@@ -113,8 +117,9 @@ export default function ExportDialog() {
         filters,
         ids: ids.slice(0, PREVIEW_IDS),
         columns: previewColumns,
+        headers: previewHeaders,
       }),
-    enabled: open && !!sourceId && !!items && chosen.length > 0,
+    enabled: open && !!sourceId && !!items && chosen.length > 0 && !duplicate,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
     retry: false,
@@ -124,7 +129,7 @@ export default function ExportDialog() {
     if (!sourceId) return;
     const t = templates.data?.find((x) => x.id === id);
     setTemplateId(t?.id ?? '');
-    setItems(t ? itemsFromTemplate(cols, t.columns) : defaultItems(cols));
+    setItems(t ? itemsFromTemplate(cols, t.columns, t.headers) : defaultItems(cols));
     setExportTemplate(sourceId, t?.id ?? null);
     setConfirmDelete(false);
     setNewName(null);
@@ -133,7 +138,12 @@ export default function ExportDialog() {
   const refreshTemplates = () => qc.invalidateQueries({ queryKey: templatesKey });
   const create = useMutation({
     mutationFn: (name: string) =>
-      exportService.createTemplate({ sourceId: sourceId!, name, columns: chosen }),
+      exportService.createTemplate({
+        sourceId: sourceId!,
+        name,
+        columns: chosen,
+        headers: headers ?? {},
+      }),
     onSuccess: async (t) => {
       await refreshTemplates();
       setTemplateId(t.id);
@@ -144,7 +154,8 @@ export default function ExportDialog() {
     onError: (err) => toast.error(errorMessage(err)),
   });
   const update = useMutation({
-    mutationFn: () => exportService.updateTemplate(templateId, { columns: chosen }),
+    mutationFn: () =>
+      exportService.updateTemplate(templateId, { columns: chosen, headers: headers ?? {} }),
     onSuccess: async (t) => {
       await refreshTemplates();
       toast.success(`Modelo "${t.name}" atualizado.`);
@@ -164,15 +175,20 @@ export default function ExportDialog() {
 
   if (!open || !sourceId) return null;
 
-  const setAll = (enabled: boolean) => setItems((list) => list?.map((i) => ({ ...i, enabled })) ?? list);
-  const toggle = (key: string) =>
-    setItems((list) => list?.map((i) => (i.key === key ? { ...i, enabled: !i.enabled } : i)) ?? list);
-  const move = (from: number, to: number) => setItems((list) => (list ? moveItem(list, from, to) : list));
-
   const run = async () => {
     setBusy(true);
     try {
-      await exportData({ sourceId, format, scope, filters, ids, delimiter, decimal, columns });
+      await exportData({
+        sourceId,
+        format,
+        scope,
+        filters,
+        ids,
+        delimiter,
+        decimal,
+        columns,
+        headers,
+      });
       toast.success('Exportação iniciada.');
       closeDialog('export');
     } catch (err) {
@@ -198,7 +214,7 @@ export default function ExportDialog() {
             variant="primary"
             onClick={run}
             loading={busy}
-            disabled={(delimiter === decimal && format === 'csv') || !chosen.length}
+            disabled={(delimiter === decimal && format === 'csv') || !chosen.length || !!duplicate}
           >
             Exportar
           </Button>
@@ -308,7 +324,7 @@ export default function ExportDialog() {
               <Button
                 size="sm"
                 icon={<Save className="size-3.5" />}
-                disabled={!dirty || !chosen.length}
+                disabled={!dirty || !chosen.length || !!duplicate}
                 loading={update.isPending}
                 onClick={() => update.mutate()}
                 title="Grava a seleção e a ordem atuais neste modelo"
@@ -318,7 +334,7 @@ export default function ExportDialog() {
             )}
             <Button
               size="sm"
-              disabled={!chosen.length}
+              disabled={!chosen.length || !!duplicate}
               onClick={() => setNewName(newName === null ? '' : null)}
             >
               Salvar como novo…
@@ -372,27 +388,6 @@ export default function ExportDialog() {
             </form>
           )}
 
-          <div className="flex items-center justify-between gap-2 pt-1 text-xs text-slate-500">
-            <span>
-              {items ? `${chosen.length} de ${items.length} colunas` : 'Carregando colunas…'}
-              {dirty && template && <span className="ml-1 text-amber-600">(alterado)</span>}
-            </span>
-            <span className="flex gap-2">
-              <button type="button" className="hover:text-accent-700" onClick={() => setAll(true)}>
-                Marcar todas
-              </button>
-              <button type="button" className="hover:text-accent-700" onClick={() => setAll(false)}>
-                Desmarcar todas
-              </button>
-              <button
-                type="button"
-                className="hover:text-accent-700"
-                onClick={() => setItems(defaultItems(cols))}
-              >
-                Ordem original
-              </button>
-            </span>
-          </div>
           {schema.isError ? (
             <p className="text-sm text-red-600">{errorMessage(schema.error)}</p>
           ) : !items ? (
@@ -400,73 +395,18 @@ export default function ExportDialog() {
               <Loader2 className="size-5 animate-spin text-slate-400" />
             </div>
           ) : (
-            <ul className="scroll-thin max-h-72 overflow-y-auto rounded-md border border-slate-200">
-              {items.map((it, i) => {
-                const c = colByKey.get(it.key);
-                if (!c) return null;
-                return (
-                  <li
-                    key={it.key}
-                    draggable
-                    onDragStart={(e) => {
-                      setDragIndex(i);
-                      e.dataTransfer.effectAllowed = 'move';
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      if (dragIndex !== null && dragIndex !== i) {
-                        move(dragIndex, i);
-                        setDragIndex(i);
-                      }
-                    }}
-                    onDragEnd={() => setDragIndex(null)}
-                    className={clsx(
-                      'group flex items-center gap-2 border-b border-slate-100 px-2 py-1 text-sm last:border-b-0',
-                      dragIndex === i ? 'bg-accent-50' : 'hover:bg-slate-50',
-                    )}
-                  >
-                    <GripVertical className="size-3.5 shrink-0 cursor-grab text-slate-300" />
-                    <input
-                      type="checkbox"
-                      checked={it.enabled}
-                      onChange={() => toggle(it.key)}
-                      className="size-3.5 shrink-0 accent-accent-600"
-                      aria-label={`Exportar ${c.label}`}
-                    />
-                    <span
-                      className={clsx(
-                        'min-w-0 flex-1 truncate',
-                        it.enabled ? 'text-slate-800' : 'text-slate-400',
-                      )}
-                      title={c.label}
-                    >
-                      {c.label}
-                    </span>
-                    <span className="hidden shrink-0 truncate text-xs text-slate-400 sm:inline">
-                      {c.hint}
-                    </span>
-                    <button
-                      type="button"
-                      className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 disabled:opacity-30"
-                      disabled={i === 0}
-                      onClick={() => move(i, i - 1)}
-                      aria-label="Subir"
-                    >
-                      <ArrowUp className="size-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 disabled:opacity-30"
-                      disabled={i === items.length - 1}
-                      onClick={() => move(i, i + 1)}
-                      aria-label="Descer"
-                    >
-                      <ArrowDown className="size-3.5" />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+            <ColumnList
+              items={items}
+              columns={colByKey}
+              onChange={setItems}
+              renamable
+              onReset={() => {
+                // Volta a ordem e marca todas, mantendo os nomes alternativos digitados
+                const alias = new Map(items.map((i) => [i.key, i.alias]));
+                setItems(defaultItems(cols).map((i) => ({ ...i, alias: alias.get(i.key) })));
+              }}
+              status={dirty && template && <span className="ml-1 text-amber-600">(alterado)</span>}
+            />
           )}
         </div>
       </div>
@@ -486,6 +426,10 @@ export default function ExportDialog() {
         {!chosen.length ? (
           <p className="rounded-md border border-dashed border-slate-300 p-4 text-center text-sm text-slate-500">
             Marque ao menos uma coluna para exportar.
+          </p>
+        ) : duplicate ? (
+          <p className="rounded-md border border-dashed border-red-200 p-4 text-center text-sm text-red-600">
+            O nome "{duplicate}" aparece mais de uma vez no cabeçalho. Use nomes diferentes.
           </p>
         ) : preview.isError ? (
           <p className="text-sm text-red-600">{errorMessage(preview.error)}</p>

@@ -8,6 +8,7 @@ import { join } from 'path';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { ApiTokenGuard } from './common/api-token.guard';
 import { LoggingInterceptor } from './common/logging.interceptor';
+import { AssociationModule } from './modules/association/association.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { ChangesModule } from './modules/changes/changes.module';
 import { ExportModule } from './modules/export/export.module';
@@ -38,6 +39,7 @@ const staticModules: DynamicModule[] = existsSync(join(FRONTEND_DIST, 'index.htm
     TablesModule,
     PointsModule,
     ExportModule,
+    AssociationModule,
     LayersModule,
     ProjectsModule,
     HealthModule,

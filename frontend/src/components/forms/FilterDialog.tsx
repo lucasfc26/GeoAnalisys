@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useActiveSource, useSourceSchema } from '@/hooks/useSourceData';
 import { useDebounce } from '@/hooks/useDebounce';
 import { sourcesService } from '@/services/sources';
@@ -10,6 +10,7 @@ import { fmtInt } from '@/utils/format';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Input, Select } from '../ui/Field';
+import { FilterReplaceSection } from './FilterReplaceSection';
 
 const OP_LABEL: Record<FilterOp, string> = {
   eq: 'igual a',
@@ -42,6 +43,13 @@ export function opsFor(col: ColumnMeta | undefined): FilterOp[] {
     default:
       return ['contains', 'eq', 'neq', 'notContains', 'startsWith', 'in', 'isNull', 'notNull'];
   }
+}
+
+function isComplete(f: FilterDef) {
+  if (f.op === 'isNull' || f.op === 'notNull') return true;
+  if (f.op === 'in') return (f.values ?? []).length > 0;
+  if (f.op === 'between') return (f.values ?? []).some((v) => v !== '' && v !== undefined);
+  return f.value !== undefined && f.value !== '';
 }
 
 function ValuesPicker({
@@ -102,6 +110,7 @@ export default function FilterDialog() {
   useEffect(() => {
     if (open) setRows(filters.length ? filters : []);
   }, [open, filters]);
+  const complete = useMemo(() => rows.filter(isComplete), [rows]);
 
   if (!open || !sourceId) return null;
   const cols = schema.data?.columns ?? [];
@@ -116,15 +125,8 @@ export default function FilterDialog() {
     setRows((r) => [...r, { column: first, op: c?.kind === 'text' ? 'in' : opsFor(c)[0], values: [] }]);
   };
 
-  const isComplete = (f: FilterDef) => {
-    if (f.op === 'isNull' || f.op === 'notNull') return true;
-    if (f.op === 'in') return (f.values ?? []).length > 0;
-    if (f.op === 'between') return (f.values ?? []).some((v) => v !== '' && v !== undefined);
-    return f.value !== undefined && f.value !== '';
-  };
-
   const apply = () => {
-    setFilters(rows.filter(isComplete));
+    setFilters(complete);
     closeDialog('filters');
   };
 
@@ -234,6 +236,12 @@ export default function FilterDialog() {
         <Button icon={<Plus className="size-4" />} onClick={addRow} disabled={!cols.length}>
           Adicionar condição
         </Button>
+        <FilterReplaceSection
+          sourceId={sourceId}
+          filters={complete}
+          columns={cols}
+          blocked={[source?.idColumn, source?.xColumn, source?.yColumn]}
+        />
       </div>
     </Dialog>
   );

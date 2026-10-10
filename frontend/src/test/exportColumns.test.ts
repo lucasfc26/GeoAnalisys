@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { LAT_KEY, LNG_KEY } from '@/services/export';
 import type { SourceSchema } from '@/types';
 import {
+  aliasesOf,
   defaultItems,
+  duplicateHeader,
   enabledKeys,
   exportColumns,
   isDefaultOrder,
   itemsFromTemplate,
   moveItem,
+  sameAliases,
 } from '@/utils/exportColumns';
 
 const schema = {
@@ -46,7 +49,33 @@ describe('colunas da exportação', () => {
     const items = defaultItems(cols);
     expect(isDefaultOrder(items, cols)).toBe(true);
     expect(isDefaultOrder(moveItem(items, 0, 1), cols)).toBe(false);
-    expect(isDefaultOrder(items.map((i, n) => ({ ...i, enabled: n > 0 })), cols)).toBe(false);
+    expect(
+      isDefaultOrder(
+        items.map((i, n) => ({ ...i, enabled: n > 0 })),
+        cols,
+      ),
+    ).toBe(false);
+  });
+
+  it('nomes alternativos: só das colunas marcadas, vindos do modelo e sem repetir cabeçalho', () => {
+    const items = itemsFromTemplate(cols, ['ID', 'potencia'], { ID: 'idd' });
+    expect(aliasesOf(items)).toEqual({ ID: 'idd' });
+    const edited = items.map((i) =>
+      i.key === 'medicao'
+        ? { ...i, alias: 'med' }
+        : i.key === 'potencia'
+          ? { ...i, alias: '  ' }
+          : i,
+    );
+    expect(aliasesOf(edited)).toEqual({ ID: 'idd' });
+    expect(aliasesOf(defaultItems(cols))).toBeUndefined();
+    expect(sameAliases({ ID: 'idd' }, { ID: 'idd' })).toBe(true);
+    expect(sameAliases({ ID: 'idd' }, undefined)).toBe(false);
+
+    const byKey = new Map(cols.map((c) => [c.key, c]));
+    expect(duplicateHeader(items, byKey)).toBeNull();
+    const dup = items.map((i) => (i.key === 'ID' ? { ...i, alias: 'POTENCIA' } : i));
+    expect(duplicateHeader(dup, byKey)).toBe('POTENCIA');
   });
 
   it('move itens sem sair dos limites', () => {

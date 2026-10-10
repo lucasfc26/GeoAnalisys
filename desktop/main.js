@@ -9,7 +9,7 @@
  * configurações. O sistema (janela principal) monta e aplica o conteúdo; aqui ficam os diálogos de
  * arquivo, a leitura/gravação no disco e a lista de recentes.
  */
-const { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, safeStorage, session, shell } = require('electron');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -77,6 +77,34 @@ function decrypt(b64) {
 }
 
 const keyOf = (c) => `${c.user}@${c.host}:${c.port}/${c.database}`;
+
+// ------------------------------------------------------------------ tema (Sobre > Tema)
+
+const prefsFile = () => path.join(app.getPath('userData'), 'preferencias.json');
+
+function readPrefs() {
+  try {
+    return JSON.parse(fs.readFileSync(prefsFile(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/** 'light' | 'dark'. As janelas seguem pelo prefers-color-scheme (CSS do sistema e da conexão). */
+function readTheme() {
+  return readPrefs().theme === 'dark' ? 'dark' : 'light';
+}
+
+function setTheme(theme) {
+  nativeTheme.themeSource = theme;
+  try {
+    fs.mkdirSync(path.dirname(prefsFile()), { recursive: true });
+    fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), theme }, null, 2));
+  } catch {
+    /* não grava: vale só nesta execução */
+  }
+  buildMenu();
+}
 
 // ------------------------------------------------------------------ projetos (.proj)
 
@@ -259,7 +287,13 @@ function openMainWindow(origin, c) {
     height: 900,
     show: false,
     title: mainTitle,
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      // Leitor de PDF (relatórios abertos no preview do modo lista).
+      plugins: true,
+    },
   });
   buildMenu();
   mainWin.maximize();
@@ -295,6 +329,7 @@ function openMainWindow(origin, c) {
 function buildMenu() {
   const hasMain = !!mainWin;
   const { recent } = readProjects();
+  const theme = readTheme();
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
@@ -357,7 +392,17 @@ function buildMenu() {
         ],
       },
       {
-        label: 'Ajuda',
+        label: 'Ferramentas',
+        submenu: [
+          {
+            label: 'Associar Camadas…',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('tool:open', 'associate'),
+          },
+        ],
+      },
+      {
+        label: 'Sobre',
         submenu: [
           {
             label: 'Sobre o GeoAnalisys',
@@ -368,6 +413,19 @@ function buildMenu() {
                 message: `GeoAnalisys ${app.getVersion()}`,
                 detail: 'Sistema GIS de pontos (PostgreSQL/PostGIS + MapLibre).',
               }),
+          },
+          {
+            label: 'Atalhos…',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('tool:open', 'shortcuts'),
+          },
+          { type: 'separator' },
+          {
+            label: 'Tema',
+            submenu: [
+              { label: 'Claro', type: 'radio', checked: theme === 'light', click: () => setTheme('light') },
+              { label: 'Escuro', type: 'radio', checked: theme === 'dark', click: () => setTheme('dark') },
+            ],
           },
         ],
       },
@@ -460,6 +518,29 @@ ipcMain.on('project:activated', (_e, file) => {
   }
 });
 
+/**
+ * Preview do modo lista: muitos sites proíbem ser exibidos dentro de outra página (X-Frame-Options,
+ * CSP frame-ancestors). Só para páginas carregadas em frames, esses bloqueios são removidos; o frame
+ * continua isolado do sistema (sandbox, sem acesso ao preload).
+ */
+function allowFramedPreviews() {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    if (details.resourceType !== 'subFrame') return callback({});
+    const headers = { ...details.responseHeaders };
+    for (const name of Object.keys(headers)) {
+      const lower = name.toLowerCase();
+      if (lower === 'x-frame-options') delete headers[name];
+      else if (lower === 'content-security-policy') {
+        headers[name] = headers[name]
+          .map((v) => v.split(';').filter((d) => !/^\s*frame-ancestors\b/i.test(d)).join(';'))
+          .filter((v) => v.trim());
+        if (!headers[name].length) delete headers[name];
+      }
+    }
+    callback({ responseHeaders: headers });
+  });
+}
+
 // ------------------------------------------------------------------ ciclo de vida
 
 process.on('unhandledRejection', (err) => {
@@ -486,6 +567,8 @@ if (applyingUpdate) {
     const updating = await updater.checkAndDownload();
     checkingUpdate = false;
     if (updating) return app.exit(0); // o exe novo assume: instala e reabre o programa
+    allowFramedPreviews();
+    nativeTheme.themeSource = readTheme();
     buildMenu();
     openConnectWindow();
   });

@@ -54,7 +54,13 @@ interface DesktopProjectBridge {
 
 declare global {
   interface Window {
-    geoanalisys?: { project?: DesktopProjectBridge };
+    geoanalisys?: {
+      project?: DesktopProjectBridge;
+      /** Menus Ferramentas e Sobre do programa desktop */
+      tools?: { onOpen: (fn: (name: string) => void) => void };
+      /** Caminho no disco de um arquivo escolhido (null se não houver) */
+      files?: { pathOf: (file: File) => string | null };
+    };
   }
 }
 
@@ -172,7 +178,7 @@ async function applyFile(
     activeKey: null,
     activeRecordId: null,
     transform: null,
-    listMode: false,
+    listWindows: [],
     searchWindows: [],
     dialogs: initial.dialogs,
     focus: view ? { center: view.center, zoom: view.zoom, nonce: Date.now() } : null,

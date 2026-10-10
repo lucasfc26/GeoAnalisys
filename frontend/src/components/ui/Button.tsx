@@ -12,11 +12,11 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variants: Record<Variant, string> = {
-  primary: 'bg-accent-600 text-white hover:bg-accent-700 shadow-sm disabled:bg-accent-600/50',
+  primary: 'bg-accent-600 text-white hover:bg-accent-hover shadow-sm disabled:bg-accent-600/50',
   secondary:
     'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 shadow-sm disabled:text-slate-400',
   ghost: 'text-slate-600 hover:bg-slate-100 disabled:text-slate-300',
-  danger: 'bg-red-600 text-white hover:bg-red-700 shadow-sm disabled:bg-red-600/50',
+  danger: 'bg-red-600 text-white hover:bg-danger-hover shadow-sm disabled:bg-red-600/50',
 };
 
 export function Button({
@@ -113,7 +113,7 @@ export function IconButton({
       {tip && !rest.disabled && (
         <span
           style={tip}
-          className="pointer-events-none fixed z-50 whitespace-nowrap rounded bg-slate-900 px-2 py-1 text-xs font-normal text-white shadow-lg"
+          className="pointer-events-none tone-fixed fixed z-50 whitespace-nowrap rounded bg-slate-900 px-2 py-1 text-xs font-normal text-white shadow-lg"
         >
           {label}
           {shortcut && (
