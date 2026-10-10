@@ -27,6 +27,10 @@ import {
   type TransformMode,
 } from '@/types';
 
+/** Partes da tela que o menu Exibir mostra/oculta: painel de camadas, mapas de fundo, informações. */
+export type ViewPart = 'layers' | 'maps' | 'info';
+export type ViewHidden = Record<ViewPart, boolean>;
+
 /** Janela flutuante presa a uma camada ("Selecionar por valor" ou "Modo lista"). */
 export interface SearchWindow {
   id: string;
@@ -83,10 +87,16 @@ interface AppState {
   basemap: Basemap;
   /** Fundos adicionados por URL (XYZ) */
   customBasemaps: CustomBasemap[];
+  /** Ordem da lista de fundos (ids; arrastando na lista). Vazia = ordem padrão */
+  basemapOrder: string[];
+  /** Nomes dados aos fundos padrão (OpenStreetMap, Esri…), só visual */
+  basemapNames: Record<string, string>;
   /** Camadas de limites (só metadados; as geometrias ficam no IndexedDB) */
   boundaries: BoundaryLayer[];
   focus: MapFocus | null;
   panelOpen: boolean;
+  /** Menu Exibir: partes da tela ocultas (preferência da máquina, fora do projeto) */
+  viewHidden: ViewHidden;
   /** Desktop: painel da direita recolhido (só a faixa para reabrir) */
   panelCollapsed: boolean;
   /** Desktop: largura do painel da direita (px) */
@@ -158,6 +168,10 @@ interface AppState {
   openSearchWindow: (sourceId: string) => void;
   closeSearchWindow: (id: string) => void;
   setBasemap: (basemap: Basemap) => void;
+  setBasemapOrder: (order: string[]) => void;
+  /** Renomeia um fundo padrão (vazio = nome original) */
+  setBasemapName: (id: string, name: string) => void;
+  updateCustomBasemap: (id: string, patch: Partial<Omit<CustomBasemap, 'id'>>) => void;
   addCustomBasemap: (b: CustomBasemap) => void;
   removeCustomBasemap: (id: string) => void;
   addBoundaries: (items: BoundaryLayer[]) => void;
@@ -170,6 +184,8 @@ interface AppState {
   removeIds: (ids: string[]) => void;
   openRecord: (key: string | null, id: string | null) => void;
   focusMap: (f: Omit<MapFocus, 'nonce'>) => void;
+  /** Mostra/oculta uma parte da tela (sem `show`: alterna) */
+  setViewHidden: (part: ViewPart, hidden?: boolean) => void;
   setPanelOpen: (open: boolean) => void;
   setPanelCollapsed: (collapsed: boolean) => void;
   setPanelWidth: (width: number) => void;
@@ -239,8 +255,11 @@ export const useAppStore = create<AppState>()(
       searchWindows: [],
       basemap: 'osm',
       customBasemaps: [],
+      basemapOrder: [],
+      basemapNames: {},
       boundaries: [],
       focus: null,
+      viewHidden: { layers: false, maps: false, info: false },
       panelOpen: false,
       panelCollapsed: false,
       panelWidth: 384,
@@ -405,6 +424,18 @@ export const useAppStore = create<AppState>()(
       closeSearchWindow: (id) =>
         set((s) => ({ searchWindows: s.searchWindows.filter((w) => w.id !== id) })),
       setBasemap: (basemap) => set({ basemap }),
+      setBasemapOrder: (basemapOrder) => set({ basemapOrder }),
+      setBasemapName: (id, name) =>
+        set((s) => {
+          const basemapNames = { ...s.basemapNames };
+          if (name.trim()) basemapNames[id] = name.trim();
+          else delete basemapNames[id];
+          return { basemapNames };
+        }),
+      updateCustomBasemap: (id, patch) =>
+        set((s) => ({
+          customBasemaps: s.customBasemaps.map((b) => (b.id === id ? { ...b, ...patch } : b)),
+        })),
       addCustomBasemap: (b) =>
         set((s) => ({ customBasemaps: [...s.customBasemaps, b], basemap: `xyz:${b.id}` })),
       removeCustomBasemap: (id) =>
@@ -485,6 +516,10 @@ export const useAppStore = create<AppState>()(
 
       openRecord: (key, id) => set({ activeKey: key, activeRecordId: id, panelOpen: true }),
       focusMap: (f) => set({ focus: { ...f, nonce: Date.now() } }),
+      setViewHidden: (part, hidden) =>
+        set((s) => ({
+          viewHidden: { ...s.viewHidden, [part]: hidden ?? !s.viewHidden[part] },
+        })),
       setPanelOpen: (open) => set({ panelOpen: open }),
       setPanelCollapsed: (panelCollapsed) => set({ panelCollapsed }),
       setPanelWidth: (panelWidth) => set({ panelWidth }),
@@ -524,7 +559,10 @@ export const useAppStore = create<AppState>()(
         layerFilters: s.layerFilters,
         basemap: s.basemap,
         customBasemaps: s.customBasemaps,
+        basemapOrder: s.basemapOrder,
+        basemapNames: s.basemapNames,
         boundaries: s.boundaries,
+        viewHidden: s.viewHidden,
         panelCollapsed: s.panelCollapsed,
         panelWidth: s.panelWidth,
         panelHeight: s.panelHeight,
@@ -552,6 +590,8 @@ export const PROJECT_KEYS = [
   'layerFilters',
   'basemap',
   'customBasemaps',
+  'basemapOrder',
+  'basemapNames',
   'boundaries',
   'summaryColumns',
   'exportTemplates',

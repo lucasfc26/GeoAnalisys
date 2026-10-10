@@ -58,6 +58,11 @@ declare global {
       project?: DesktopProjectBridge;
       /** Menus Ferramentas e Sobre do programa desktop */
       tools?: { onOpen: (fn: (name: string) => void) => void };
+      /** Menu Exibir: alternar partes da tela e informar o que está visível */
+      view?: {
+        onToggle: (fn: (part: string) => void) => void;
+        state: (state: { layers: boolean; maps: boolean; info: boolean }) => void;
+      };
       /** Caminho no disco de um arquivo escolhido (null se não houver) */
       files?: { pathOf: (file: File) => string | null };
     };

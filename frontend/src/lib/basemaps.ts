@@ -97,3 +97,58 @@ export function resolveBasemap(id: string, custom: CustomBasemap[]): BasemapDef 
   }
   return BUILTIN_BASEMAPS.find((b) => b.id === DEFAULT_BASEMAP)!;
 }
+
+/** Item da lista de fundos: id ("osm", "xyz:<id>"…), nome e se foi adicionado por URL. */
+export interface BasemapItem {
+  id: string;
+  label: string;
+  custom: boolean;
+}
+
+/**
+ * Fundos na ordem escolhida pelo usuário (arrastando na lista). Os que não estão na ordem salva
+ * (novos, ou sem ordem ainda) vão no fim: padrões e depois os adicionados por URL.
+ */
+export function orderedBasemaps(
+  order: string[] | undefined,
+  custom: CustomBasemap[],
+  /** Nomes dados pelo usuário aos fundos padrão (só visual) */
+  names: Record<string, string> = {},
+): BasemapItem[] {
+  const all: BasemapItem[] = [
+    ...BUILTIN_BASEMAPS.map((b) => ({ id: b.id, label: names[b.id] || b.label, custom: false })),
+    ...custom.map((c) => ({ id: `xyz:${c.id}`, label: c.name, custom: true })),
+  ];
+  const byId = new Map(all.map((b) => [b.id, b]));
+  const seen = new Set<string>();
+  const out: BasemapItem[] = [];
+  for (const id of order ?? []) {
+    const b = byId.get(id);
+    if (b && !seen.has(id)) {
+      seen.add(id);
+      out.push(b);
+    }
+  }
+  return [...out, ...all.filter((b) => !seen.has(b.id))];
+}
+
+/** Ordem depois de arrastar `drag` para antes/depois de `target`. */
+export function moveBasemap(
+  ids: string[],
+  drag: string,
+  target: string,
+  where: 'before' | 'after',
+): string[] {
+  if (drag === target || !ids.includes(drag) || !ids.includes(target)) return ids;
+  const rest = ids.filter((id) => id !== drag);
+  const i = rest.indexOf(target);
+  rest.splice(where === 'after' ? i + 1 : i, 0, drag);
+  return rest;
+}
+
+/** Link (URL dos tiles) do fundo como o usuário escreveria: {s} no lugar dos subdomínios a/b/c. */
+export function basemapLink(def: BasemapDef, custom?: CustomBasemap): string {
+  if (custom) return custom.url;
+  if (!def.tiles.length) return '';
+  return def.tiles.length > 1 ? def.tiles[0].replace('//a.', '//{s}.') : def.tiles[0];
+}

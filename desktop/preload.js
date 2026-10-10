@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld('geoanalisys', {
       }
     },
   },
+  // Menu Exibir: mostrar/ocultar painel de camadas, mapas de fundo e aba de informações
+  view: {
+    onToggle: (fn) => ipcRenderer.on('view:toggle', (_e, part) => fn(part)),
+    state: (state) => ipcRenderer.send('view:state', state),
+  },
   // Menus Ferramentas e Sobre (abrem diálogos do sistema)
   tools: {
     onOpen: (fn) => ipcRenderer.on('tool:open', (_e, name) => fn(name)),

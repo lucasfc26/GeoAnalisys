@@ -27,6 +27,8 @@ let mainWin = null;
 let started = false;
 /** Título da janela principal sem o projeto: "GeoAnalisys — banco (usuário@servidor)" */
 let mainTitle = 'GeoAnalisys';
+/** Exibir: partes da tela visíveis no sistema (o sistema informa; o menu mostra a marca) */
+let viewState = { layers: true, maps: true, info: true };
 
 // ------------------------------------------------------------------ nome antigo (Censo GIS)
 
@@ -381,6 +383,18 @@ function buildMenu() {
       {
         label: 'Exibir',
         submenu: [
+          ...[
+            ['layers', 'Painel de camadas'],
+            ['maps', 'Mapas de fundo'],
+            ['info', 'Aba de informações'],
+          ].map(([part, label]) => ({
+            label,
+            type: 'checkbox',
+            checked: viewState[part],
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('view:toggle', part),
+          })),
+          { type: 'separator' },
           { role: 'reload', label: 'Recarregar' },
           { role: 'togglefullscreen', label: 'Tela cheia' },
           { type: 'separator' },
@@ -509,6 +523,12 @@ ipcMain.handle('project:write', (_e, file, data) => {
 });
 
 /** O sistema passou a usar este projeto (null = nenhum): título da janela e recentes. */
+// Exibir: o sistema avisa o que está visível (mudou pelo menu ou pelos botões da própria tela).
+ipcMain.on('view:state', (_e, state) => {
+  viewState = { ...viewState, ...state };
+  buildMenu();
+});
+
 ipcMain.on('project:activated', (_e, file) => {
   if (file && isProjectFile(file)) {
     addRecent(file);

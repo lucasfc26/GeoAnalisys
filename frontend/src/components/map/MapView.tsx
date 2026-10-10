@@ -219,6 +219,7 @@ export default function MapView() {
   // Enquanto move/duplica, as ferramentas de seleção/desenho ficam suspensas.
   const tool = useAppStore((s) => (s.transform ? 'pan' : s.tool));
   const searchWindows = useAppStore((s) => s.searchWindows);
+  const viewHidden = useAppStore((s) => s.viewHidden);
   const listWindows = useAppStore((s) => s.listWindows);
   const selection = useAppStore((s) => s.selection);
   const setSelection = useAppStore((s) => s.setSelection);
@@ -506,11 +507,11 @@ export default function MapView() {
           overlay={overlayRef}
         />
       ))}
-      <BasemapControl />
+      <BasemapControl hidden={viewHidden.maps} />
       <BoundariesLayer />
       <TransformController overlay={overlayRef} sourceId={sourceId} />
       <FocusController />
-      <LayersPanel runtimes={runtimes} />
+      {!viewHidden.layers && <LayersPanel runtimes={runtimes} />}
 
       <div
         ref={tipRef}

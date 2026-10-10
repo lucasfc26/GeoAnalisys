@@ -86,6 +86,7 @@ function Workspace() {
   const actions = useToolActions();
   useShortcuts(actions);
   const online = useOnline();
+  const infoHidden = useAppStore((s) => s.viewHidden.info);
 
   return (
     <div className="flex h-full flex-col">
@@ -111,7 +112,7 @@ function Workspace() {
             <MapView />
           </Suspense>
         </main>
-        <RightPanel />
+        {!infoHidden && <RightPanel />}
       </div>
       <div className="lg:hidden">
         <ToolPanel orientation="horizontal" />
