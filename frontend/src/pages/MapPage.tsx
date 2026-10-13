@@ -1,3 +1,4 @@
+import clsx from 'clsx';
 import type { Map as MlMap } from 'maplibre-gl';
 import { WifiOff } from 'lucide-react';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
@@ -10,6 +11,7 @@ import { useOnline } from '@/hooks/useOnline';
 import { useShortcuts } from '@/hooks/useShortcuts';
 import { errorMessage } from '@/lib/api';
 import { MapContext } from '@/lib/mapContext';
+import type { ToolbarSide } from '@/lib/toolbar';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
 import { Loader2 } from 'lucide-react';
@@ -28,6 +30,10 @@ const ImportLayerDialog = lazy(() => import('@/components/layers/ImportLayerDial
 const CopyToLayerDialog = lazy(() => import('@/components/layers/CopyToLayerDialog'));
 const MapMakerDialog = lazy(() => import('@/components/maps/MapMakerDialog'));
 const AssociateLayersDialog = lazy(() => import('@/components/tools/AssociateLayersDialog'));
+const DuplicatesDialog = lazy(() => import('@/components/tools/DuplicatesDialog'));
+const OutsideBoundaryDialog = lazy(() => import('@/components/tools/OutsideBoundaryDialog'));
+const AttributeDistanceDialog = lazy(() => import('@/components/tools/AttributeDistanceDialog'));
+const ComparisonDialog = lazy(() => import('@/components/tools/ComparisonDialog'));
 const LayerAboutDialog = lazy(() => import('@/components/layers/LayerAboutDialog'));
 const ShortcutsDialog = lazy(() => import('@/components/help/ShortcutsDialog'));
 
@@ -47,6 +53,10 @@ function Dialogs() {
       {d.copyToLayer && <CopyToLayerDialog />}
       {d.mapMaker && <MapMakerDialog />}
       {d.associate && <AssociateLayersDialog />}
+      {d.duplicates && <DuplicatesDialog />}
+      {d.outsideBoundary && <OutsideBoundaryDialog />}
+      {d.attributeDistance && <AttributeDistanceDialog />}
+      {d.comparison && <ComparisonDialog />}
       {d.layerAbout && <LayerAboutDialog />}
       {d.shortcuts && <ShortcutsDialog />}
     </Suspense>
@@ -87,19 +97,31 @@ function Workspace() {
   useShortcuts(actions);
   const online = useOnline();
   const infoHidden = useAppStore((s) => s.viewHidden.info);
+  const side = useAppStore((s) => s.toolbarSide);
+  // Telas grandes: barra no lado escolhido; pequenas: sempre embaixo, sobre o mapa.
+  const bar = (at: ToolbarSide) =>
+    side === at && (
+      <div
+        className={clsx(
+          'hidden min-h-0 min-w-0 lg:flex',
+          at === 'top' || at === 'bottom' ? 'flex-col' : '',
+        )}
+      >
+        <ToolPanel side={at} />
+      </div>
+    );
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col overflow-hidden">
       <TopBar />
       {!online && (
         <div className="flex items-center justify-center gap-2 bg-amber-500 px-3 py-1 text-xs font-medium text-white">
           <WifiOff className="size-3.5" /> Sem conexão — os dados podem estar desatualizados.
         </div>
       )}
+      {bar('top')}
       <div className="relative flex min-h-0 flex-1">
-        <div className="hidden min-h-0 lg:flex">
-          <ToolPanel orientation="vertical" />
-        </div>
+        {bar('left')}
         {/* isolate: o empilhamento das janelas flutuantes fica restrito à área do mapa. */}
         <main className="relative isolate min-w-0 flex-1">
           <Suspense
@@ -113,9 +135,11 @@ function Workspace() {
           </Suspense>
         </main>
         {!infoHidden && <RightPanel />}
+        {bar('right')}
       </div>
+      {bar('bottom')}
       <div className="lg:hidden">
-        <ToolPanel orientation="horizontal" />
+        <ToolPanel side="bottom" mobile />
       </div>
       <InitialFit />
       <Dialogs />

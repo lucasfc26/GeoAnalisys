@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { readBoundaryFiles } from '@/lib/boundaries';
+import {
+  boundaryPolygons,
+  featureLabels,
+  readBoundaryFiles,
+  type GeoCollection,
+} from '@/lib/boundaries';
 
 const UTM24S =
   'PROJCS["SIRGAS_2000_UTM_Zone_24S",GEOGCS["GCS_SIRGAS_2000",DATUM["D_SIRGAS_2000",SPHEROID["GRS_1980",6378137.0,298.257222101]],' +
   'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["False_Easting",500000.0],' +
   'PARAMETER["False_Northing",10000000.0],PARAMETER["Central_Meridian",-39.0],PARAMETER["Scale_Factor",0.9996],' +
   'PARAMETER["Latitude_Of_Origin",0.0],UNIT["Meter",1.0]]';
-const PROJ4_UTM24S = '+proj=utm +zone=24 +south +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs';
+const PROJ4_UTM24S =
+  '+proj=utm +zone=24 +south +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs';
 
 /** Shapefile mínimo (.shp) com um polígono (anel de 5 pontos). */
 function polygonShp(ring: [number, number][]) {
@@ -68,9 +74,67 @@ describe('readBoundaryFiles', () => {
   });
 
   it('lê GeoJSON em lat/lng', async () => {
-    const gj = { type: 'Polygon', coordinates: [[[-38.5, -3.7], [-38.4, -3.7], [-38.4, -3.6], [-38.5, -3.7]]] };
+    const gj = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [-38.5, -3.7],
+          [-38.4, -3.7],
+          [-38.4, -3.6],
+          [-38.5, -3.7],
+        ],
+      ],
+    };
     const [b] = await readBoundaryFiles([new File([JSON.stringify(gj)], 'area.geojson')], null);
     expect(b.data.features).toHaveLength(1);
     expect(b.bounds).toEqual({ minLat: -3.7, maxLat: -3.6, minLng: -38.5, maxLng: -38.4 });
+  });
+});
+
+describe('limite nas ferramentas (Fora do limite)', () => {
+  const sq = (x: number) => [
+    [
+      [x, 0, 5],
+      [x + 1, 0, 5],
+      [x + 1, 1, 5],
+      [x, 0, 5],
+    ],
+  ];
+  const fc: GeoCollection = {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: sq(0) },
+        properties: { CD: 1, NM_MUN: 'Fortaleza' },
+      },
+      {
+        type: 'Feature',
+        geometry: { type: 'MultiPolygon', coordinates: [sq(2), sq(4)] },
+        properties: { CD: 2, NM_MUN: 'Caucaia' },
+      },
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [0, 0],
+            [1, 1],
+          ],
+        },
+        properties: { CD: 3 },
+      },
+    ],
+  };
+
+  it('polígonos de todas as feições ou de uma só (linhas ignoradas, sem a altitude)', () => {
+    expect(boundaryPolygons(fc)).toHaveLength(3);
+    expect(boundaryPolygons(fc, 1)).toHaveLength(2);
+    expect(boundaryPolygons(fc, 2)).toHaveLength(0);
+    expect(boundaryPolygons(fc, 0)[0][0][1]).toEqual([1, 0]);
+  });
+
+  it('nome das feições pelo atributo que parece nome', () => {
+    expect(featureLabels(fc)).toEqual(['Fortaleza', 'Caucaia', 'Feição 3']);
   });
 });

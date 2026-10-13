@@ -1,6 +1,7 @@
 import clsx from 'clsx';
 import { Loader2 } from 'lucide-react';
-import { useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { useContext, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { ToolbarSideContext, type ToolbarSide } from '@/lib/toolbar';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
 
@@ -56,9 +57,16 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 type TipPos = { left: number; top: number; transform: string };
 
-/** Posição da dica: à direita do botão; abaixo se faltar espaço; acima nas telas pequenas (barra inferior). */
-function tipPosition(r: DOMRect): TipPos {
-  if (window.innerWidth < 1024)
+/**
+ * Posição da dica: do lado do mapa quando o botão está na barra de ferramentas; fora dela, à direita
+ * do botão, abaixo se faltar espaço, acima nas telas pequenas (barra inferior).
+ */
+function tipPosition(r: DOMRect, side: ToolbarSide | null): TipPos {
+  if (side === 'right')
+    return { left: r.left - 8, top: r.top + r.height / 2, transform: 'translate(-100%, -50%)' };
+  if (side === 'top')
+    return { left: r.left + r.width / 2, top: r.bottom + 8, transform: 'translateX(-50%)' };
+  if (side === 'bottom' || window.innerWidth < 1024)
     return { left: r.left + r.width / 2, top: r.top - 8, transform: 'translate(-50%, -100%)' };
   if (r.right + 260 > window.innerWidth)
     return { left: r.left + r.width / 2, top: r.bottom + 8, transform: 'translateX(-50%)' };
@@ -79,13 +87,14 @@ export function IconButton({
   ...rest
 }: IconButtonProps) {
   const [tip, setTip] = useState<TipPos | null>(null);
+  const side = useContext(ToolbarSideContext);
   return (
     <button
       type="button"
       aria-label={label}
       aria-pressed={active}
       onMouseEnter={(e) => {
-        setTip(tipPosition(e.currentTarget.getBoundingClientRect()));
+        setTip(tipPosition(e.currentTarget.getBoundingClientRect(), side));
         onMouseEnter?.(e);
       }}
       onMouseLeave={(e) => {

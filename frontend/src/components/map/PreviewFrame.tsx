@@ -1,9 +1,11 @@
 import { ExternalLink, MonitorPlay } from 'lucide-react';
+import type { CSSProperties } from 'react';
 import { FloatingPanel } from '../ui/FloatingPanel';
 
 /**
- * Frame do preview do modo lista: um por lista em análise. A janela fica montada enquanto o preview
- * estiver ligado; ao navegar, só o endereço muda (posição e tamanho escolhidos são mantidos).
+ * Frame do preview (modo lista, Duplicidades): um por registro em análise. A janela fica montada
+ * enquanto o preview estiver ligado; ao navegar, só o endereço muda (posição e tamanho escolhidos são
+ * mantidos).
  */
 export function PreviewFrame({
   title,
@@ -11,6 +13,7 @@ export function PreviewFrame({
   message,
   index,
   onClose,
+  placement,
 }: {
   title: string;
   /** Link a carregar; sem link, mostra `message` */
@@ -19,15 +22,21 @@ export function PreviewFrame({
   /** Ordem (lista 1, 2…): janelas deslocadas para não ficarem uma sobre a outra */
   index: number;
   onClose: () => void;
+  /** Posição e tamanho iniciais no lugar do padrão (canto superior direito, em cascata) */
+  placement?: { defaultClassName: string; defaultStyle?: CSSProperties; className: string };
 }) {
   return (
     <FloatingPanel
       title={title}
       icon={<MonitorPlay className="size-4 text-accent-600" />}
       onClose={onClose}
-      defaultClassName="top-3 right-3"
-      defaultStyle={{ marginTop: (index % 6) * 32, marginRight: (index % 6) * 32 }}
-      className="h-[26rem] w-[34rem] max-w-[calc(100%-1.5rem)]"
+      defaultClassName={placement?.defaultClassName ?? 'top-3 right-3'}
+      defaultStyle={
+        placement
+          ? placement.defaultStyle
+          : { marginTop: (index % 6) * 32, marginRight: (index % 6) * 32 }
+      }
+      className={placement?.className ?? 'h-[26rem] w-[34rem] max-w-[calc(100%-1.5rem)]'}
       resizable={{ minWidth: 240, minHeight: 160 }}
       actions={
         url && (

@@ -19,7 +19,6 @@ export function ToolGroup({
   current,
   last,
   disabled,
-  orientation,
   onPick,
   extra = [],
 }: {
@@ -27,13 +26,13 @@ export function ToolGroup({
   current: Tool;
   last: Tool;
   disabled?: boolean;
-  orientation: 'vertical' | 'horizontal';
   onPick: (tool: Tool) => void;
   /** Ações extras no fim da lista (ex.: limpar seleção) */
   extra?: HoldMenuItem[];
 }) {
   const keyOf = useShortcutKeys();
-  const shown = tools.find((t) => t.tool === current) ?? tools.find((t) => t.tool === last) ?? tools[0];
+  const shown =
+    tools.find((t) => t.tool === current) ?? tools.find((t) => t.tool === last) ?? tools[0];
   return (
     <HoldMenuButton
       label={shown.label}
@@ -41,7 +40,6 @@ export function ToolGroup({
       icon={shown.icon}
       active={tools.some((t) => t.tool === current)}
       disabled={disabled}
-      orientation={orientation}
       onClick={() => onPick(shown.tool)}
       items={[
         ...tools.map((t) => ({

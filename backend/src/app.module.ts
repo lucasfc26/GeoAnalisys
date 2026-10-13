@@ -8,9 +8,12 @@ import { join } from 'path';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { ApiTokenGuard } from './common/api-token.guard';
 import { LoggingInterceptor } from './common/logging.interceptor';
+import { AnalysisModule } from './modules/analysis/analysis.module';
+import { ComparisonModule } from './modules/comparison/comparison.module';
 import { AssociationModule } from './modules/association/association.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { ChangesModule } from './modules/changes/changes.module';
+import { DuplicatesModule } from './modules/duplicates/duplicates.module';
 import { ExportModule } from './modules/export/export.module';
 import { HealthModule } from './modules/health/health.controller';
 import { LayersModule } from './modules/layers/layers.module';
@@ -40,6 +43,9 @@ const staticModules: DynamicModule[] = existsSync(join(FRONTEND_DIST, 'index.htm
     PointsModule,
     ExportModule,
     AssociationModule,
+    DuplicatesModule,
+    AnalysisModule,
+    ComparisonModule,
     LayersModule,
     ProjectsModule,
     HealthModule,

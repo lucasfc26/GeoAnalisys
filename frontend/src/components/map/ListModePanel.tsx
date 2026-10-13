@@ -12,9 +12,10 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePreviewConfig } from '@/hooks/usePreviewConfig';
 import { queryKeys, useSourceSchema, useSources } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
-import { DEFAULT_PREVIEW, previewUrl, type PreviewConfig } from '@/lib/listPreview';
+import { previewUrl } from '@/lib/listPreview';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
 import type { ColumnMeta, PointRecord, SelectedGroup } from '@/types';
@@ -27,6 +28,7 @@ import { FloatingPanel } from '../ui/FloatingPanel';
 import { toast } from '../ui/Toaster';
 import { metersPerCm, zoomOfScale } from './pointsOverlay';
 import { PreviewFrame } from './PreviewFrame';
+import { PreviewSettings } from './PreviewSettings';
 
 /** Escalas do controle de aproximação (metros por 1 cm de tela). */
 const SCALES = [1, 2, 5, 10, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000];
@@ -67,17 +69,6 @@ function buildSteps(results: { items: Item[] }[]): Step[] {
     if (step.some((e) => e?.item.groups.length)) out.push(step);
   }
   return out;
-}
-
-/** Configuração do preview (atributo do link ou modelo), lembrada por camada. */
-const previewKey = (sourceId: string) => `geoanalisys-list-preview:${sourceId}`;
-function loadPreview(sourceId: string): PreviewConfig {
-  try {
-    const v = JSON.parse(localStorage.getItem(previewKey(sourceId)) ?? 'null');
-    return v && typeof v === 'object' ? { ...DEFAULT_PREVIEW, ...v } : DEFAULT_PREVIEW;
-  } catch {
-    return DEFAULT_PREVIEW;
-  }
 }
 
 const colsKey = (sourceId: string | null) => `geoanalisys-list-cols:${sourceId ?? ''}`;
@@ -290,16 +281,7 @@ export function ListModePanel({
   const [sameCoord, setSameCoord] = useState(false);
   /** Preview: frame com o link do registro em análise (um por lista) */
   const [preview, setPreview] = useState(false);
-  const [previewCfg, setPreviewCfgState] = useState<PreviewConfig>(() => loadPreview(sourceId));
-  const setPreviewCfg = (patch: Partial<PreviewConfig>) => {
-    const next = { ...previewCfg, ...patch };
-    setPreviewCfgState(next);
-    try {
-      localStorage.setItem(previewKey(sourceId), JSON.stringify(next));
-    } catch {
-      /* só nesta sessão */
-    }
-  };
+  const [previewCfg, setPreviewCfg] = usePreviewConfig(sourceId);
   const request = useRef(0);
   const [shownCols, setShownCols] = useState<string[]>(() => loadCols(sourceId));
 
@@ -755,75 +737,13 @@ export function ListModePanel({
                     </span>
                   </label>
                   {preview && (
-                    <div className="ml-5 space-y-1.5 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name={`preview-mode-${windowId}`}
-                          checked={previewCfg.mode === 'column'}
-                          onChange={() => setPreviewCfg({ mode: 'column' })}
-                          className="accent-accent-600"
-                        />
-                        <span className="w-28 shrink-0">Atributo com o link</span>
-                        <select
-                          value={previewCfg.column}
-                          onChange={(e) =>
-                            setPreviewCfg({ mode: 'column', column: e.target.value })
-                          }
-                          className="h-6 min-w-0 flex-1 rounded border border-slate-300 bg-white px-1 text-[11px]"
-                          aria-label="Atributo com o link"
-                        >
-                          <option value="">— escolha —</option>
-                          {columns.map((c) => (
-                            <option key={c.name} value={c.name}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="radio"
-                          name={`preview-mode-${windowId}`}
-                          checked={previewCfg.mode === 'template'}
-                          onChange={() => setPreviewCfg({ mode: 'template' })}
-                          className="accent-accent-600"
-                        />
-                        <span className="w-28 shrink-0">Montar o link</span>
-                        <select
-                          value=""
-                          onChange={(e) =>
-                            e.target.value &&
-                            setPreviewCfg({
-                              mode: 'template',
-                              template: `${previewCfg.template}{${e.target.value}}`,
-                            })
-                          }
-                          className="h-6 min-w-0 flex-1 rounded border border-dashed border-slate-300 bg-white px-1 text-[11px] text-slate-600"
-                          aria-label="Inserir atributo no link"
-                        >
-                          <option value="">+ inserir atributo</option>
-                          {columns.map((c) => (
-                            <option key={c.name} value={c.name}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      {previewCfg.mode === 'template' && (
-                        <>
-                          <input
-                            value={previewCfg.template}
-                            onChange={(e) => setPreviewCfg({ template: e.target.value })}
-                            placeholder="https://site.com/relatorio?id={ID}"
-                            className="block h-7 w-full rounded border border-slate-300 bg-white px-1.5 font-mono text-[11px]"
-                            aria-label="Modelo do link"
-                          />
-                          <p className="text-[11px] text-slate-400">
-                            {'{atributo}'} é trocado pelo valor do ponto em análise.
-                          </p>
-                        </>
-                      )}
+                    <div className="ml-5">
+                      <PreviewSettings
+                        name={`preview-mode-${windowId}`}
+                        columns={columns}
+                        cfg={previewCfg}
+                        onChange={setPreviewCfg}
+                      />
                     </div>
                   )}
                 </div>

@@ -11,6 +11,7 @@ import {
   type DropWhere,
   type TreeRef,
 } from '@/lib/layerTree';
+import type { ToolbarSide } from '@/lib/toolbar';
 import {
   SELECT_TOOLS,
   type Basemap,
@@ -97,6 +98,8 @@ interface AppState {
   panelOpen: boolean;
   /** Menu Exibir: partes da tela ocultas (preferência da máquina, fora do projeto) */
   viewHidden: ViewHidden;
+  /** Lado da barra de ferramentas nas telas grandes (preferência da máquina, fora do projeto) */
+  toolbarSide: ToolbarSide;
   /** Desktop: painel da direita recolhido (só a faixa para reabrir) */
   panelCollapsed: boolean;
   /** Desktop: largura do painel da direita (px) */
@@ -134,6 +137,14 @@ interface AppState {
     mapMaker: boolean;
     /** Ferramentas › Associar Camadas */
     associate: boolean;
+    /** Ferramentas › Duplicidades */
+    duplicates: boolean;
+    /** Ferramentas › Fora do limite */
+    outsideBoundary: boolean;
+    /** Ferramentas › Distância por atributo */
+    attributeDistance: boolean;
+    /** Ferramentas › Lista comparativa */
+    comparison: boolean;
     /** Sobre › Atalhos */
     shortcuts: boolean;
   };
@@ -186,6 +197,7 @@ interface AppState {
   focusMap: (f: Omit<MapFocus, 'nonce'>) => void;
   /** Mostra/oculta uma parte da tela (sem `show`: alterna) */
   setViewHidden: (part: ViewPart, hidden?: boolean) => void;
+  setToolbarSide: (side: ToolbarSide) => void;
   setPanelOpen: (open: boolean) => void;
   setPanelCollapsed: (collapsed: boolean) => void;
   setPanelWidth: (width: number) => void;
@@ -214,6 +226,10 @@ const closedDialogs: AppState['dialogs'] = {
   copyToLayer: false,
   mapMaker: false,
   associate: false,
+  duplicates: false,
+  outsideBoundary: false,
+  attributeDistance: false,
+  comparison: false,
   shortcuts: false,
 };
 
@@ -260,6 +276,7 @@ export const useAppStore = create<AppState>()(
       boundaries: [],
       focus: null,
       viewHidden: { layers: false, maps: false, info: false },
+      toolbarSide: 'left',
       panelOpen: false,
       panelCollapsed: false,
       panelWidth: 384,
@@ -520,6 +537,7 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           viewHidden: { ...s.viewHidden, [part]: hidden ?? !s.viewHidden[part] },
         })),
+      setToolbarSide: (toolbarSide) => set({ toolbarSide }),
       setPanelOpen: (open) => set({ panelOpen: open }),
       setPanelCollapsed: (panelCollapsed) => set({ panelCollapsed }),
       setPanelWidth: (panelWidth) => set({ panelWidth }),
@@ -563,6 +581,7 @@ export const useAppStore = create<AppState>()(
         basemapNames: s.basemapNames,
         boundaries: s.boundaries,
         viewHidden: s.viewHidden,
+        toolbarSide: s.toolbarSide,
         panelCollapsed: s.panelCollapsed,
         panelWidth: s.panelWidth,
         panelHeight: s.panelHeight,

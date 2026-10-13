@@ -160,6 +160,45 @@ export async function readBoundaryFiles(
   return out;
 }
 
+/** Polígonos ([anel][ponto][lng, lat]) de uma geometria; linhas e pontos são ignorados. */
+function polygonsOf(g: GeoFeature['geometry']): number[][][][] {
+  if (!g) return [];
+  if (g.type === 'GeometryCollection') return (g.geometries ?? []).flatMap(polygonsOf);
+  const ring = (r: unknown) =>
+    Array.isArray(r) ? (r as number[][]).map((p) => [Number(p[0]), Number(p[1])]) : [];
+  if (g.type === 'Polygon') return [(g.coordinates as unknown[]).map(ring)];
+  if (g.type === 'MultiPolygon')
+    return (g.coordinates as unknown[][]).map((poly) => poly.map(ring));
+  return [];
+}
+
+/**
+ * Polígonos do limite para as ferramentas (Fora do limite): de todas as feições ou só da feição
+ * `index`.
+ */
+export function boundaryPolygons(fc: GeoCollection, index: number | null = null): number[][][][] {
+  const features = index === null ? fc.features : fc.features.slice(index, index + 1);
+  return features.flatMap((f) => polygonsOf(f.geometry));
+}
+
+const NAME_KEY = /^(nome|name|nm_|nm|municipio|munic|bairro|setor|descri|label|titulo|id)/i;
+
+/** Nome de cada feição pelo atributo que parece nome (nome, NM_MUN, name…); senão "Feição N". */
+export function featureLabels(fc: GeoCollection): string[] {
+  const text = (v: unknown) =>
+    v === null || v === undefined || typeof v === 'object' ? '' : String(v).trim();
+  const keys = Object.keys(fc.features.find((f) => f.properties)?.properties ?? {});
+  const key =
+    keys.find((k) => NAME_KEY.test(k) && fc.features.some((f) => text(f.properties?.[k]))) ??
+    keys.find((k) =>
+      fc.features.some((f) => typeof f.properties?.[k] === 'string' && text(f.properties[k])),
+    );
+  return fc.features.map((f, i) => {
+    const v = key ? text(f.properties?.[key]) : '';
+    return v || `Feição ${i + 1}`;
+  });
+}
+
 // ------------------------------------------------------------------ IndexedDB
 
 const DB_NAME = 'geoanalisys-boundaries';

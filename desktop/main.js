@@ -28,7 +28,7 @@ let started = false;
 /** Título da janela principal sem o projeto: "GeoAnalisys — banco (usuário@servidor)" */
 let mainTitle = 'GeoAnalisys';
 /** Exibir: partes da tela visíveis no sistema (o sistema informa; o menu mostra a marca) */
-let viewState = { layers: true, maps: true, info: true };
+let viewState = { layers: true, maps: true, info: true, toolbar: 'left' };
 
 // ------------------------------------------------------------------ nome antigo (Censo GIS)
 
@@ -394,6 +394,21 @@ function buildMenu() {
             enabled: hasMain,
             click: () => mainWin?.webContents.send('view:toggle', part),
           })),
+          {
+            label: 'Barra de ferramentas',
+            enabled: hasMain,
+            submenu: [
+              ['left', 'Esquerda'],
+              ['right', 'Direita'],
+              ['top', 'Em cima'],
+              ['bottom', 'Embaixo'],
+            ].map(([side, label]) => ({
+              label,
+              type: 'radio',
+              checked: viewState.toolbar === side,
+              click: () => mainWin?.webContents.send('view:toggle', `toolbar:${side}`),
+            })),
+          },
           { type: 'separator' },
           { role: 'reload', label: 'Recarregar' },
           { role: 'togglefullscreen', label: 'Tela cheia' },
@@ -412,6 +427,26 @@ function buildMenu() {
             label: 'Associar Camadas…',
             enabled: hasMain,
             click: () => mainWin?.webContents.send('tool:open', 'associate'),
+          },
+          {
+            label: 'Duplicidades…',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('tool:open', 'duplicates'),
+          },
+          {
+            label: 'Fora do limite…',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('tool:open', 'outsideBoundary'),
+          },
+          {
+            label: 'Distância por atributo…',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('tool:open', 'attributeDistance'),
+          },
+          {
+            label: 'Lista comparativa…',
+            enabled: hasMain,
+            click: () => mainWin?.webContents.send('tool:open', 'comparison'),
           },
         ],
       },

@@ -61,7 +61,13 @@ declare global {
       /** Menu Exibir: alternar partes da tela e informar o que está visível */
       view?: {
         onToggle: (fn: (part: string) => void) => void;
-        state: (state: { layers: boolean; maps: boolean; info: boolean }) => void;
+        state: (state: {
+          layers: boolean;
+          maps: boolean;
+          info: boolean;
+          /** Lado da barra de ferramentas */
+          toolbar: string;
+        }) => void;
       };
       /** Caminho no disco de um arquivo escolhido (null se não houver) */
       files?: { pathOf: (file: File) => string | null };

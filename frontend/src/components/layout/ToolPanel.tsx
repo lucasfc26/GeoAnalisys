@@ -14,6 +14,10 @@ import {
   MousePointer2,
   MousePointerClick,
   Move,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
+  PanelTop,
   Pentagon,
   PersonStanding,
   RefreshCw,
@@ -27,8 +31,10 @@ import {
 import { useActiveSource, useInvalidatePoints, useSelectedIds } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
 import { copyTable } from '@/lib/clipboard';
+import type { ReactNode } from 'react';
 import { useMap } from '@/lib/mapContext';
 import { useShortcutKeys } from '@/lib/shortcuts';
+import { TOOLBAR_SIDES, ToolbarSideContext, type ToolbarSide } from '@/lib/toolbar';
 import { fetchSelectedTable } from '@/services/export';
 import { pointsService } from '@/services/points';
 import { fmtInt } from '@/utils/format';
@@ -179,16 +185,28 @@ function Divider({ vertical }: { vertical?: boolean }) {
   return <div className={vertical ? 'mx-1 h-6 w-px bg-slate-200' : 'my-1 h-px w-6 bg-slate-200'} />;
 }
 
-export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizontal' }) {
+const SIDE_ICONS: Record<ToolbarSide, ReactNode> = {
+  left: <PanelLeft className="size-5" />,
+  right: <PanelRight className="size-5" />,
+  top: <PanelTop className="size-5" />,
+  bottom: <PanelBottom className="size-5" />,
+};
+
+/**
+ * Barra de ferramentas num dos lados do mapa (telas grandes) ou presa embaixo, sobre o mapa
+ * (`mobile`, telas pequenas).
+ */
+export function ToolPanel({ side, mobile }: { side: ToolbarSide; mobile?: boolean }) {
   const tool = useAppStore((s) => s.tool);
   const setTool = useAppStore((s) => s.setTool);
+  const setToolbarSide = useAppStore((s) => s.setToolbarSide);
   const transform = useAppStore((s) => s.transform);
   const lastSelectTool = useAppStore((s) => s.lastSelectTool);
   const listOpen = useAppStore((s) => s.listWindows.length > 0);
   const searchOpen = useAppStore((s) => s.searchWindows.length > 0);
   const a = useToolActions();
   const keyOf = useShortcutKeys();
-  const vertical = orientation === 'vertical';
+  const vertical = side === 'left' || side === 'right';
   // Régua e Street View não dependem de uma camada.
   const needsSource = (t: ToolDef) =>
     t.tool !== 'pan' && t.tool !== 'measure' && t.tool !== 'streetview';
@@ -206,134 +224,154 @@ export function ToolPanel({ orientation }: { orientation: 'vertical' | 'horizont
   );
 
   return (
-    <nav
-      aria-label="Ferramentas"
-      className={clsx(
-        'flex items-center gap-1 bg-white',
-        vertical
-          ? 'scroll-thin w-13 shrink-0 flex-col overflow-x-hidden overflow-y-auto border-r border-slate-200 py-2'
-          : 'scroll-thin fixed right-0 bottom-0 left-0 z-30 overflow-x-auto border-t border-slate-200 px-2 py-1.5 shadow-[0_-2px_8px_rgba(0,0,0,0.06)]',
-      )}
-    >
-      {toolButton(PAN)}
-      <ToolGroup
-        tools={SELECTION_TOOLS}
-        current={transform ? 'pan' : tool}
-        last={lastSelectTool}
-        disabled={!a.hasSource}
-        orientation={vertical ? 'vertical' : 'horizontal'}
-        onPick={setTool}
-      />
-      {OTHER_TOOLS.map(toolButton)}
-      <Divider vertical={!vertical} />
-      <IconButton
-        label="Mover selecionados"
-        shortcut={keyOf('move')}
-        active={transform === 'move'}
-        disabled={!a.hasSelection}
-        onClick={() => a.transform('move')}
+    <ToolbarSideContext.Provider value={side}>
+      <nav
+        aria-label="Ferramentas"
+        className={clsx(
+          'scroll-thin flex shrink-0 items-center gap-1 border-slate-200 bg-white',
+          mobile
+            ? 'fixed right-0 bottom-0 left-0 z-30 overflow-x-auto border-t px-2 py-1.5 shadow-[0_-2px_8px_rgba(0,0,0,0.06)]'
+            : vertical
+              ? 'w-13 flex-col overflow-x-hidden overflow-y-auto py-2'
+              : 'overflow-x-auto overflow-y-hidden px-2 py-1.5',
+          !mobile &&
+            { left: 'border-r', right: 'border-l', top: 'border-b', bottom: 'border-t' }[side],
+        )}
       >
-        <Move className="size-5" />
-      </IconButton>
-      <IconButton
-        label="Duplicar selecionados"
-        shortcut={keyOf('duplicate')}
-        active={transform === 'copy'}
-        disabled={!a.hasSelection}
-        onClick={() => a.transform('copy')}
-      >
-        <Copy className="size-5" />
-      </IconButton>
-      <IconButton
-        label="Copiar selecionados para nova camada"
-        disabled={!a.hasSelection}
-        onClick={() => a.copyToLayer()}
-      >
-        <CopyPlus className="size-5" />
-      </IconButton>
-      <IconButton
-        label="Excluir selecionados"
-        shortcut={keyOf('remove')}
-        disabled={!a.hasSelection}
-        onClick={a.remove}
-      >
-        <Trash2 className="size-5" />
-      </IconButton>
-      <Divider vertical={!vertical} />
-      <IconButton
-        label="Modo lista (percorrer valores)"
-        shortcut={keyOf('list')}
-        active={listOpen}
-        disabled={!a.hasSource}
-        onClick={() => {
-          // Sempre abre mais uma janela, para a camada ativa.
-          const s = useAppStore.getState();
-          if (s.sourceId) s.openListWindow(s.sourceId);
-        }}
-      >
-        <ListOrdered className="size-5" />
-      </IconButton>
-      <IconButton
-        label="Selecionar por valor (atributos)"
-        shortcut={keyOf('search')}
-        active={searchOpen}
-        disabled={!a.hasSource}
-        onClick={() => {
-          // Sempre abre mais uma janela, para a camada ativa.
-          const s = useAppStore.getState();
-          if (s.sourceId) s.openSearchWindow(s.sourceId);
-        }}
-      >
-        <TextSearch className="size-5" />
-      </IconButton>
-      <HoldMenuButton
-        label={a.hasSelection ? 'Centralizar nos selecionados' : 'Centralizar na tabela atual'}
-        shortcut={keyOf('center')}
-        icon={<Crosshair className="size-5" />}
-        disabled={!a.hasSource}
-        orientation={vertical ? 'vertical' : 'horizontal'}
-        onClick={a.center}
-        items={[
-          {
-            key: 'selected',
-            label: 'Pontos selecionados',
-            icon: <MousePointer2 className="size-5" />,
-            disabled: !a.hasSelection,
-            onSelect: a.centerSelected,
-          },
-          {
-            key: 'table',
-            label: 'Tabela atual',
-            icon: <Table2 className="size-5" />,
-            onSelect: () => void a.centerTable(),
-          },
-          {
-            key: 'all',
-            label: 'Todos os dados exibidos',
-            icon: <Layers className="size-5" />,
-            onSelect: () => void a.centerAll(),
-          },
-        ]}
-      />
-      <IconButton label="Aproximar" shortcut={keyOf('zoomIn')} onClick={() => a.zoom(1)}>
-        <ZoomIn className="size-5" />
-      </IconButton>
-      <IconButton label="Afastar" shortcut={keyOf('zoomOut')} onClick={() => a.zoom(-1)}>
-        <ZoomOut className="size-5" />
-      </IconButton>
-      <Divider vertical={!vertical} />
-      <IconButton label="Exportar" disabled={!a.hasSource} onClick={a.exportData}>
-        <Download className="size-5" />
-      </IconButton>
-      <IconButton label="Criar mapa (Comitê / Status 18)" onClick={a.makeMap}>
-        <MapPlus className="size-5" />
-      </IconButton>
-      <IconButton label="Tabela de Alterações" onClick={() => a.openChanges()}>
-        <History className="size-5" />
-      </IconButton>
-      <IconButton label="Atualizar dados" disabled={!a.hasSource} onClick={a.refresh}>
-        <RefreshCw className="size-5" />
-      </IconButton>
-    </nav>
+        {toolButton(PAN)}
+        <ToolGroup
+          tools={SELECTION_TOOLS}
+          current={transform ? 'pan' : tool}
+          last={lastSelectTool}
+          disabled={!a.hasSource}
+          onPick={setTool}
+        />
+        {OTHER_TOOLS.map(toolButton)}
+        <Divider vertical={!vertical} />
+        <IconButton
+          label="Mover selecionados"
+          shortcut={keyOf('move')}
+          active={transform === 'move'}
+          disabled={!a.hasSelection}
+          onClick={() => a.transform('move')}
+        >
+          <Move className="size-5" />
+        </IconButton>
+        <IconButton
+          label="Duplicar selecionados"
+          shortcut={keyOf('duplicate')}
+          active={transform === 'copy'}
+          disabled={!a.hasSelection}
+          onClick={() => a.transform('copy')}
+        >
+          <Copy className="size-5" />
+        </IconButton>
+        <IconButton
+          label="Copiar selecionados para nova camada"
+          disabled={!a.hasSelection}
+          onClick={() => a.copyToLayer()}
+        >
+          <CopyPlus className="size-5" />
+        </IconButton>
+        <IconButton
+          label="Excluir selecionados"
+          shortcut={keyOf('remove')}
+          disabled={!a.hasSelection}
+          onClick={a.remove}
+        >
+          <Trash2 className="size-5" />
+        </IconButton>
+        <Divider vertical={!vertical} />
+        <IconButton
+          label="Modo lista (percorrer valores)"
+          shortcut={keyOf('list')}
+          active={listOpen}
+          disabled={!a.hasSource}
+          onClick={() => {
+            // Sempre abre mais uma janela, para a camada ativa.
+            const s = useAppStore.getState();
+            if (s.sourceId) s.openListWindow(s.sourceId);
+          }}
+        >
+          <ListOrdered className="size-5" />
+        </IconButton>
+        <IconButton
+          label="Selecionar por valor (atributos)"
+          shortcut={keyOf('search')}
+          active={searchOpen}
+          disabled={!a.hasSource}
+          onClick={() => {
+            // Sempre abre mais uma janela, para a camada ativa.
+            const s = useAppStore.getState();
+            if (s.sourceId) s.openSearchWindow(s.sourceId);
+          }}
+        >
+          <TextSearch className="size-5" />
+        </IconButton>
+        <HoldMenuButton
+          label={a.hasSelection ? 'Centralizar nos selecionados' : 'Centralizar na tabela atual'}
+          shortcut={keyOf('center')}
+          icon={<Crosshair className="size-5" />}
+          disabled={!a.hasSource}
+          onClick={a.center}
+          items={[
+            {
+              key: 'selected',
+              label: 'Pontos selecionados',
+              icon: <MousePointer2 className="size-5" />,
+              disabled: !a.hasSelection,
+              onSelect: a.centerSelected,
+            },
+            {
+              key: 'table',
+              label: 'Tabela atual',
+              icon: <Table2 className="size-5" />,
+              onSelect: () => void a.centerTable(),
+            },
+            {
+              key: 'all',
+              label: 'Todos os dados exibidos',
+              icon: <Layers className="size-5" />,
+              onSelect: () => void a.centerAll(),
+            },
+          ]}
+        />
+        <IconButton label="Aproximar" shortcut={keyOf('zoomIn')} onClick={() => a.zoom(1)}>
+          <ZoomIn className="size-5" />
+        </IconButton>
+        <IconButton label="Afastar" shortcut={keyOf('zoomOut')} onClick={() => a.zoom(-1)}>
+          <ZoomOut className="size-5" />
+        </IconButton>
+        <Divider vertical={!vertical} />
+        <IconButton label="Exportar" disabled={!a.hasSource} onClick={a.exportData}>
+          <Download className="size-5" />
+        </IconButton>
+        <IconButton label="Criar mapa (Comitê / Status 18)" onClick={a.makeMap}>
+          <MapPlus className="size-5" />
+        </IconButton>
+        <IconButton label="Tabela de Alterações" onClick={() => a.openChanges()}>
+          <History className="size-5" />
+        </IconButton>
+        <IconButton label="Atualizar dados" disabled={!a.hasSource} onClick={a.refresh}>
+          <RefreshCw className="size-5" />
+        </IconButton>
+        {!mobile && (
+          <div className={clsx('flex shrink-0', vertical ? 'mt-auto pt-1' : 'ml-auto pl-1')}>
+            <HoldMenuButton
+              label="Posição da barra de ferramentas"
+              icon={SIDE_ICONS[side]}
+              menuOnClick
+              items={TOOLBAR_SIDES.map((o) => ({
+                key: o.side,
+                label: o.label,
+                icon: SIDE_ICONS[o.side],
+                checked: o.side === side,
+                onSelect: () => setToolbarSide(o.side),
+              }))}
+            />
+          </div>
+        )}
+      </nav>
+    </ToolbarSideContext.Provider>
   );
 }

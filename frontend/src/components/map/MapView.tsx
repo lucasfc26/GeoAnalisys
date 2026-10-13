@@ -14,6 +14,7 @@ import { setProjectViewGetter } from '@/lib/project';
 import { pointsService } from '@/services/points';
 import { crsService } from '@/services/sources';
 import { useAppStore } from '@/stores/appStore';
+import { useDuplicatesStore } from '@/stores/duplicatesStore';
 import type { Bounds, LatLng, MapCluster } from '@/types';
 import { fmtInt, fmtValue } from '@/utils/format';
 import { LayersPanel } from '../layers/LayersPanel';
@@ -21,6 +22,7 @@ import { ErrorState } from '../ui/States';
 import { toast } from '../ui/Toaster';
 import { BasemapControl, BoundariesLayer } from './BaseLayers';
 import { DrawingController } from './DrawingController';
+import { DuplicatesPanel } from './DuplicatesPanel';
 import { ListModePanel } from './ListModePanel';
 import { MeasureController } from './MeasureController';
 import { SelectByValuePanel } from './SelectByValuePanel';
@@ -221,6 +223,7 @@ export default function MapView() {
   const searchWindows = useAppStore((s) => s.searchWindows);
   const viewHidden = useAppStore((s) => s.viewHidden);
   const listWindows = useAppStore((s) => s.listWindows);
+  const duplicatesOpen = useDuplicatesStore((s) => s.panelOpen && !!s.result);
   const selection = useAppStore((s) => s.selection);
   const setSelection = useAppStore((s) => s.setSelection);
   const toggleGroup = useAppStore((s) => s.toggleGroup);
@@ -507,6 +510,7 @@ export default function MapView() {
           overlay={overlayRef}
         />
       ))}
+      {duplicatesOpen && <DuplicatesPanel />}
       <BasemapControl hidden={viewHidden.maps} />
       <BoundariesLayer />
       <TransformController overlay={overlayRef} sourceId={sourceId} />
