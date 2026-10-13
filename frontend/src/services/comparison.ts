@@ -1,4 +1,5 @@
 import { api, rawRequest } from '@/lib/api';
+import type { Cell, ComparisonColumn, ComparisonColumnKind } from '@/lib/comparisonColumns';
 import type { FilterDef } from '@/types';
 import { filenameFrom, triggerDownload } from './export';
 
@@ -20,8 +21,6 @@ export interface ComparisonLookup {
   /** Coluna das camadas ↔ coluna da tabela de apoio (ex.: tipo_lampada ↔ tipo) */
   keys: { column: string; lookupColumn: string }[];
   nameColumn: string | null;
-  /** Multiplicado pela diferença (ex.: consumo) */
-  factorColumn: string | null;
 }
 
 export interface ComparisonRequest {
@@ -30,20 +29,8 @@ export interface ComparisonRequest {
   blocks: ComparisonBlock[];
   lookup: ComparisonLookup | null;
   ignoreCase: boolean;
-}
-
-export interface ComparisonRow {
-  /** Nome da tabela de apoio, ou os valores do grupo, ou o título do bloco */
-  label: string;
-  values: (string | null)[];
-  counts: number[];
-  /** Última camada − primeira */
-  diff: number;
-  factor: number | null;
-  /** factor × diff */
-  result: number | null;
-  /** null = bloco sem tabela de apoio */
-  matched: boolean | null;
+  /** Colunas da tabela, em ordem (inclusive as ocultas, usadas nas fórmulas) */
+  columns: ComparisonColumn[];
 }
 
 export interface ComparisonSection {
@@ -51,16 +38,19 @@ export interface ComparisonSection {
   groupBy: string[];
   distinctColumn: string | null;
   lookup: boolean;
-  rows: ComparisonRow[];
-  totals: { counts: number[]; diff: number; result: number | null };
+  /** cells: uma por coluna visível; matched: null = bloco sem tabela de apoio */
+  rows: { cells: Cell[]; matched: boolean | null }[];
+  /** Soma das colunas marcadas para somar; "Total" na descrição */
+  totals: Cell[];
   unmatched: number;
 }
 
 export interface ComparisonResult {
   summary: {
     layers: string[];
+    /** Colunas visíveis, na ordem das células */
+    columns: { title: string; kind: ComparisonColumnKind; decimals: number | null }[];
     lookupName: string | null;
-    factorName: string | null;
     rows: number;
     unmatched: number;
     durationMs: number;

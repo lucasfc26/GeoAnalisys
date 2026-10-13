@@ -28,6 +28,8 @@ const LayerStyleDialog = lazy(() => import('@/components/layers/LayerStyleDialog
 const ChangesDialog = lazy(() => import('@/components/changes/ChangesDialog'));
 const ImportLayerDialog = lazy(() => import('@/components/layers/ImportLayerDialog'));
 const CopyToLayerDialog = lazy(() => import('@/components/layers/CopyToLayerDialog'));
+const ConvertCoordsDialog = lazy(() => import('@/components/layers/ConvertCoordsDialog'));
+const DuplicateDialog = lazy(() => import('@/components/forms/DuplicateDialog'));
 const MapMakerDialog = lazy(() => import('@/components/maps/MapMakerDialog'));
 const AssociateLayersDialog = lazy(() => import('@/components/tools/AssociateLayersDialog'));
 const DuplicatesDialog = lazy(() => import('@/components/tools/DuplicatesDialog'));
@@ -51,6 +53,8 @@ function Dialogs() {
       {d.changes && <ChangesDialog />}
       {d.importLayer && <ImportLayerDialog />}
       {d.copyToLayer && <CopyToLayerDialog />}
+      {d.duplicate && <DuplicateDialog />}
+      {d.convertCoords && <ConvertCoordsDialog key={d.convertCoords.sourceId} />}
       {d.mapMaker && <MapMakerDialog />}
       {d.associate && <AssociateLayersDialog />}
       {d.duplicates && <DuplicatesDialog />}

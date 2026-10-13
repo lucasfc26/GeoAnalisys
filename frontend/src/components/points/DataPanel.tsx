@@ -16,32 +16,18 @@ import { useMemo } from 'react';
 import { useActiveSource, useSelectedIds, useSourceSchema } from '@/hooks/useSourceData';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
-import type { SelectedGroup } from '@/types';
-import { categoryColor, fmtCoord, fmtDeg, fmtInt, fmtValue, isUrl } from '@/utils/format';
+import type { CrsDef, SelectedGroup } from '@/types';
+import { categoryColor, fmtInt, fmtValue, isUrl } from '@/utils/format';
 import { Button } from '../ui/Button';
 import { EmptyState, ErrorState, Skeleton } from '../ui/States';
+import { CoordinateGrid } from './CoordinateGrid';
 import { RecordDetails } from './RecordDetails';
 import { RecordList, type RecordItem } from './RecordList';
 
-function CoordinateHeader({ group, isUtm }: { group: SelectedGroup; isUtm: boolean }) {
+function CoordinateHeader({ group, crs }: { group: SelectedGroup; crs: CrsDef | undefined }) {
   return (
     <dl className="grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg border border-slate-200 bg-white p-3 text-xs">
-      <div>
-        <dt className="text-slate-500">{isUtm ? 'UTM X' : 'X'}</dt>
-        <dd className="font-mono text-slate-800">{fmtCoord(group.x)}</dd>
-      </div>
-      <div>
-        <dt className="text-slate-500">{isUtm ? 'UTM Y' : 'Y'}</dt>
-        <dd className="font-mono text-slate-800">{fmtCoord(group.y)}</dd>
-      </div>
-      <div>
-        <dt className="text-slate-500">Latitude</dt>
-        <dd className="font-mono text-slate-800">{fmtDeg(group.lat)}</dd>
-      </div>
-      <div>
-        <dt className="text-slate-500">Longitude</dt>
-        <dd className="font-mono text-slate-800">{fmtDeg(group.lng)}</dd>
-      </div>
+      <CoordinateGrid point={group} crs={crs} />
     </dl>
   );
 }
@@ -70,12 +56,12 @@ function itemsFor(groups: SelectedGroup[], primaryIds: string[] | null): RecordI
 function GroupView({
   sourceId,
   group,
-  isUtm,
+  crs,
   idLabel,
 }: {
   sourceId: string;
   group: SelectedGroup;
-  isUtm: boolean;
+  crs: CrsDef | undefined;
   idLabel: string;
 }) {
   const activeRecordId = useAppStore((s) => s.activeRecordId);
@@ -92,7 +78,7 @@ function GroupView({
 
   return (
     <div className="space-y-4">
-      <CoordinateHeader group={group} isUtm={isUtm} />
+      <CoordinateHeader group={group} crs={crs} />
       {multi && (
         <div>
           <div className="mb-2 flex items-center justify-between">
@@ -358,7 +344,7 @@ export function DataPanel() {
   const openRecord = useAppStore((s) => s.openRecord);
   const openDialog = useAppStore((s) => s.openDialog);
   const keys = Object.keys(selection);
-  const isUtm = !source?.coordinateSystem.match(/^EPSG:(4326|4674)$/);
+  const crs = useSourceSchema(sourceId).data?.crs;
 
   if (sources.isLoading) {
     return (
@@ -404,7 +390,7 @@ export function DataPanel() {
           <ArrowLeft className="size-3.5" /> Voltar à seleção
         </button>
         {group && group.ids.length > 1 ? (
-          <GroupView sourceId={sourceId} group={group} isUtm={isUtm} idLabel={source.idColumn} />
+          <GroupView sourceId={sourceId} group={group} crs={crs} idLabel={source.idColumn} />
         ) : (
           <RecordDetails sourceId={sourceId} id={activeRecordId} />
         )}
@@ -418,7 +404,7 @@ export function DataPanel() {
         <GroupView
           sourceId={sourceId}
           group={selection[keys[0]]}
-          isUtm={isUtm}
+          crs={crs}
           idLabel={source.idColumn}
         />
       </div>

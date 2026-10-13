@@ -6,15 +6,20 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsIn,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
+  Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
 import type { Response } from 'express';
 import { parseFilters } from '../../common/filters';
+import type { ComparisonColumnKind } from './comparison.columns';
 import { ComparisonRequest, ComparisonService } from './comparison.service';
 
 enum Format {
@@ -55,7 +60,17 @@ class LookupDto {
   @Type(() => LookupKeyDto)
   keys: LookupKeyDto[];
   @IsOptional() @IsString() @MaxLength(200) nameColumn?: string | null;
-  @IsOptional() @IsString() @MaxLength(200) factorColumn?: string | null;
+}
+
+class ColumnDto {
+  @IsIn(['label', 'group', 'count', 'diff', 'lookup', 'formula']) kind: ComparisonColumnKind;
+  @IsOptional() @IsString() @MaxLength(200) title?: string | null;
+  @IsOptional() @IsString() @MaxLength(200) column?: string | null;
+  @IsOptional() @IsInt() @Min(0) @Max(9) layer?: number | null;
+  @IsOptional() @IsString() @MaxLength(2000) expression?: string | null;
+  @IsOptional() @IsBoolean() hidden?: boolean;
+  @IsOptional() @IsBoolean() sum?: boolean;
+  @IsOptional() @IsInt() @Min(0) @Max(10) decimals?: number | null;
 }
 
 class ComparisonDto {
@@ -73,6 +88,13 @@ class ComparisonDto {
   blocks: BlockDto[];
   @IsOptional() @ValidateNested() @Type(() => LookupDto) lookup?: LookupDto | null;
   @IsOptional() @IsBoolean() ignoreCase?: boolean;
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(60)
+  @ValidateNested({ each: true })
+  @Type(() => ColumnDto)
+  columns?: ColumnDto[] | null;
 }
 
 function toRequest(dto: ComparisonDto): ComparisonRequest {
@@ -96,10 +118,21 @@ function toRequest(dto: ComparisonDto): ComparisonRequest {
           table: lk.table,
           keys: lk.keys.map((k) => ({ column: k.column, lookupColumn: k.lookupColumn })),
           nameColumn: lk.nameColumn || null,
-          factorColumn: lk.factorColumn || null,
         }
       : null,
     ignoreCase: dto.ignoreCase ?? true,
+    columns: dto.columns
+      ? dto.columns.map((c) => ({
+          kind: c.kind,
+          title: c.title?.trim() || null,
+          column: c.column || null,
+          layer: c.layer ?? null,
+          expression: c.expression ?? null,
+          hidden: c.hidden ?? false,
+          sum: c.sum ?? false,
+          decimals: c.decimals ?? null,
+        }))
+      : null,
   };
 }
 
@@ -110,14 +143,14 @@ export class ComparisonController {
 
   @Post('preview')
   @ApiOperation({
-    summary: 'Lista comparativa: contagem por grupo de atributos em cada camada, lado a lado',
+    summary: 'Quadro Comparativo: contagem por grupo de atributos em cada camada, lado a lado',
   })
   preview(@Body() dto: ComparisonDto) {
     return this.comparison.run(toRequest(dto));
   }
 
   @Post(':format')
-  @ApiOperation({ summary: 'Lista comparativa em XLSX ou CSV' })
+  @ApiOperation({ summary: 'Quadro Comparativo em XLSX ou CSV' })
   async download(
     @Param('format', new ParseEnumPipe(Format)) format: Format,
     @Body() dto: ComparisonDto,

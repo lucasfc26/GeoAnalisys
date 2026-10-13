@@ -5,6 +5,8 @@ import { queryKeys, useActiveSource } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
+import { useDuplicatesStore } from '@/stores/duplicatesStore';
+import { useToolListsStore } from '@/stores/toolListsStore';
 import { fmtInt } from '@/utils/format';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
@@ -15,11 +17,13 @@ export default function DeleteConfirmDialog() {
   const target = useAppStore((s) => s.dialogs.confirmDelete);
   const closeDialog = useAppStore((s) => s.closeDialog);
   const removeIds = useAppStore((s) => s.removeIds);
-  const { sourceId, source } = useActiveSource();
+  const { sourceId: activeId, sources } = useActiveSource();
+  const sourceId = target?.sourceId ?? activeId;
+  const source = sources.data?.find((s) => s.id === sourceId) ?? null;
   const qc = useQueryClient();
   const [ack, setAck] = useState(false);
   /** Motivo da exclusão (vai para a Tabela de Alterações) */
-  const [observation, setObservation] = useState('');
+  const [observation, setObservation] = useState(() => target?.observation ?? '');
 
   const close = () => {
     setAck(false);
@@ -33,7 +37,9 @@ export default function DeleteConfirmDialog() {
         ? pointsService.remove(sourceId!, ids[0], observation.trim())
         : pointsService.bulkDelete(sourceId!, ids, observation.trim()),
     onSuccess: (r, ids) => {
-      removeIds(ids);
+      if (sourceId === useAppStore.getState().sourceId) removeIds(ids);
+      useDuplicatesStore.getState().markDeleted(sourceId!, ids);
+      useToolListsStore.getState().markDeleted(sourceId!, ids);
       qc.invalidateQueries({ queryKey: queryKeys.points(sourceId!) });
       toast.success(`${fmtInt(r.deleted)} registro(s) excluído(s).`);
       close();

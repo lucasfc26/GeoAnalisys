@@ -1,5 +1,5 @@
 import { request } from '@/lib/api';
-import type { DataSource } from '@/types';
+import type { CrsDef, DataSource } from '@/types';
 
 export type ImportType = 'integer' | 'number' | 'text';
 export type ImportCell = string | number | boolean | null;
@@ -16,6 +16,8 @@ export interface ImportPreview {
     idColumn: string | null;
     xColumn: string | null;
     yColumn: string | null;
+    /** Coluna com o par de coordenadas na mesma célula, quando não há X e Y separados */
+    coordColumn?: string | null;
     coordinates: 'geographic' | 'projected' | null;
     /** Sistema de coordenadas do arquivo, quando conhecido (GeoJSON/KML: EPSG:4326) */
     coordinateSystem?: string | null;
@@ -29,13 +31,26 @@ export interface ImportConfig {
   schema: string;
   /** null = ID automático */
   idColumn: string | null;
-  xColumn: string;
-  yColumn: string;
+  xColumn: string | null;
+  yColumn: string | null;
   coordinateSystem: string;
   proj4?: string | null;
   labelColumn?: string | null;
   categoryColumn?: string | null;
   types: Record<string, ImportType>;
+  /** Coluna com as duas coordenadas na mesma célula (no lugar de X e Y) */
+  coordColumn?: string | null;
+  /** Gravar também as coordenadas convertidas (lat/long → UTM X/Y e zona; UTM → lat/long) */
+  convertCoordinates?: boolean;
+}
+
+export interface CoordConversionPlan {
+  source: { id: string; name: string; schema: string };
+  crs: CrsDef;
+  /** Colunas que recebem os valores; `exists` = já existe e será sobrescrita */
+  columns: { field: string; name: string; exists: boolean }[];
+  /** X/Y em texto (ex.: graus/minutos/segundos): passa a usar as colunas decimais criadas */
+  repointXY: boolean;
 }
 
 const form = (file: File, fields: Record<string, string>) => {
@@ -69,6 +84,21 @@ export const layersService = {
       method: 'POST',
       body: JSON.stringify({ sourceId, ids, name, schema }),
     }),
+
+  /** Colunas que a conversão de coordenadas vai criar/sobrescrever na tabela da camada. */
+  conversionPlan: (sourceId: string) =>
+    request<CoordConversionPlan>(`/layers/${encodeURIComponent(sourceId)}/convert-coordinates`),
+
+  /** Grava na tabela as coordenadas convertidas (lat/long ↔ UTM) de todos os registros. */
+  convertCoordinates: (sourceId: string) =>
+    request<{
+      source: DataSource;
+      rows: number;
+      converted: number;
+      columns: string[];
+      added: string[];
+      repointed: boolean;
+    }>(`/layers/${encodeURIComponent(sourceId)}/convert-coordinates`, { method: 'POST' }),
 
   /** Camada removida do mapa: apaga a tabela se estiver em GeoAnalisysTemp (outros schemas: nada). */
   removeTemp: (sourceId: string) =>

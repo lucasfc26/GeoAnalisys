@@ -56,12 +56,12 @@ describe('mergeCounts', () => {
 });
 
 describe('tabela de apoio', () => {
-  it('acha o nome e o fator pela chave normalizada (texto × inteiro)', () => {
+  it('acha o nome pela chave normalizada (texto × inteiro)', () => {
     const index = indexLookup(
       [
-        { keys: ['VS', '150'], name: 'Vapor de Sódio 150W', factor: 61.2 },
-        { keys: ['VS', '150'], name: 'duplicada', factor: 0 },
-        { keys: ['LED', '60'], name: 'LED 60W', factor: 21.6 },
+        { keys: ['VS', '150'], name: 'Vapor de Sódio 150W', values: {} },
+        { keys: ['VS', '150'], name: 'duplicada', values: {} },
+        { keys: ['LED', '60'], name: 'LED 60W', values: {} },
       ],
       true,
     );

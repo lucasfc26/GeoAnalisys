@@ -8,6 +8,7 @@ import {
   Hand,
   History,
   Layers,
+  ListChecks,
   ListOrdered,
   MapPinPlus,
   MapPlus,
@@ -38,7 +39,7 @@ import { TOOLBAR_SIDES, ToolbarSideContext, type ToolbarSide } from '@/lib/toolb
 import { fetchSelectedTable } from '@/services/export';
 import { pointsService } from '@/services/points';
 import { fmtInt } from '@/utils/format';
-import { useAppStore } from '@/stores/appStore';
+import { useAppStore, type ListMode } from '@/stores/appStore';
 import type { Bounds, TransformMode } from '@/types';
 import { boundsOfPoints, unionBounds } from '@/utils/geo';
 import { IconButton } from '../ui/Button';
@@ -165,6 +166,11 @@ export function useToolActions() {
     remove: () => ids.length && openDialog('confirmDelete', { ids }),
     transform: (mode: TransformMode) => {
       const s = useAppStore.getState();
+      // Duplicar pergunta antes: na camada atual (arrastar) ou em outra camada.
+      if (mode === 'copy' && s.transform !== 'copy') {
+        if (Object.keys(s.selection).length) openDialog('duplicate', true);
+        return;
+      }
       s.setTransform(s.transform === mode ? null : mode);
     },
     exportData: () => openDialog('export', true),
@@ -204,6 +210,11 @@ export function ToolPanel({ side, mobile }: { side: ToolbarSide; mobile?: boolea
   const lastSelectTool = useAppStore((s) => s.lastSelectTool);
   const listOpen = useAppStore((s) => s.listWindows.length > 0);
   const searchOpen = useAppStore((s) => s.searchWindows.length > 0);
+  /** Sempre abre mais uma janela do modo lista, para a camada ativa. */
+  const openList = (mode?: ListMode) => {
+    const s = useAppStore.getState();
+    if (s.sourceId) s.openListWindow(s.sourceId, mode);
+  };
   const a = useToolActions();
   const keyOf = useShortcutKeys();
   const vertical = side === 'left' || side === 'right';
@@ -282,19 +293,28 @@ export function ToolPanel({ side, mobile }: { side: ToolbarSide; mobile?: boolea
           <Trash2 className="size-5" />
         </IconButton>
         <Divider vertical={!vertical} />
-        <IconButton
+        <HoldMenuButton
           label="Modo lista (percorrer valores)"
           shortcut={keyOf('list')}
+          icon={<ListOrdered className="size-5" />}
           active={listOpen}
           disabled={!a.hasSource}
-          onClick={() => {
-            // Sempre abre mais uma janela, para a camada ativa.
-            const s = useAppStore.getState();
-            if (s.sourceId) s.openListWindow(s.sourceId);
-          }}
-        >
-          <ListOrdered className="size-5" />
-        </IconButton>
+          onClick={() => openList()}
+          items={[
+            {
+              key: 'walk',
+              label: 'Percorrer valores',
+              icon: <ListOrdered className="size-5" />,
+              onSelect: () => openList('walk'),
+            },
+            {
+              key: 'all',
+              label: 'Selecionar todos os itens da lista',
+              icon: <ListChecks className="size-5" />,
+              onSelect: () => openList('all'),
+            },
+          ]}
+        />
         <IconButton
           label="Selecionar por valor (atributos)"
           shortcut={keyOf('search')}

@@ -444,7 +444,7 @@ function buildMenu() {
             click: () => mainWin?.webContents.send('tool:open', 'attributeDistance'),
           },
           {
-            label: 'Lista comparativa…',
+            label: 'Quadro Comparativo…',
             enabled: hasMain,
             click: () => mainWin?.webContents.send('tool:open', 'comparison'),
           },

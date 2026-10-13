@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   Module,
   Param,
   Post,
@@ -41,7 +42,8 @@ class LayersController {
   @UseInterceptors(upload)
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
-    summary: 'Lê um CSV/XLSX/GeoJSON: abas, colunas, tipos detectados, prévia e sugestões de ID/X/Y',
+    summary:
+      'Lê um CSV/XLSX/GeoJSON: abas, colunas, tipos detectados, prévia e sugestões de ID/X/Y',
   })
   preview(@UploadedFile() file: Upload | undefined, @Body('sheet') sheet?: string) {
     return this.layers.preview(file, sheet || null);
@@ -69,10 +71,28 @@ class LayersController {
 
   @Post('copy')
   @ApiOperation({
-    summary: 'Copia os registros selecionados para uma nova tabela (padrão: schema GeoAnalisysTemp)',
+    summary:
+      'Copia os registros selecionados para uma nova tabela (padrão: schema GeoAnalisysTemp)',
   })
   copy(@Body() dto: CopyToLayerDto, @CurrentUser() user: string) {
     return this.layers.copyToLayer(dto.sourceId, dto.ids, dto.name, dto.schema, user);
+  }
+
+  @Get(':sourceId/convert-coordinates')
+  @ApiOperation({
+    summary: 'Colunas que receberão as coordenadas convertidas (lat/lng ↔ UTM) de uma camada',
+  })
+  conversionPreview(@Param('sourceId') sourceId: string) {
+    return this.layers.conversionPreview(sourceId);
+  }
+
+  @Post(':sourceId/convert-coordinates')
+  @ApiOperation({
+    summary:
+      'Grava na tabela da camada as coordenadas convertidas (geográfico → UTM X/Y e zona; UTM → latitude/longitude)',
+  })
+  convertCoordinates(@Param('sourceId') sourceId: string, @CurrentUser() user: string) {
+    return this.layers.convertCoordinates(sourceId, user);
   }
 
   @Delete('temp/:sourceId')
@@ -88,5 +108,6 @@ class LayersController {
 @Module({
   controllers: [LayersController],
   providers: [LayersService],
+  exports: [LayersService],
 })
 export class LayersModule {}

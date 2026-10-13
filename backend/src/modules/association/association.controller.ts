@@ -14,12 +14,20 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import type { Response } from 'express';
+import { CurrentUser } from '../../common/current-user.decorator';
 import { parseFilters } from '../../common/filters';
 import { MAX_CRITERIA } from './association.logic';
-import { AssociationRequest, AssociationService, StatusRule } from './association.service';
+import {
+  AssociationLayerTarget,
+  AssociationRequest,
+  AssociationService,
+  StatusRule,
+} from './association.service';
 
 const MAX_DISTANCE = 5000;
 const MAX_COLUMNS = 4000;
@@ -47,7 +55,10 @@ class StatusAttributeDto {
 class StatusRuleDto {
   @IsOptional() @IsBoolean() consider?: boolean;
   @IsOptional() @IsBoolean() unique?: boolean;
-  @IsOptional() @ValidateNested() @Type(() => StatusAttributeDto) attribute?: StatusAttributeDto | null;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => StatusAttributeDto)
+  attribute?: StatusAttributeDto | null;
 }
 
 class UnmatchedStatusDto {
@@ -95,13 +106,47 @@ class AssociationDto {
   criteria: CriterionDto[];
   @IsOptional() @ValidateNested() @Type(() => AggregatesDto) aggregates?: AggregatesDto;
   @IsOptional() @IsBoolean() includeUnmatchedB?: boolean;
-  @IsOptional() @ValidateNested() @Type(() => UnmatchedStatusDto) unmatchedStatus?: UnmatchedStatusDto;
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => UnmatchedStatusDto)
+  unmatchedStatus?: UnmatchedStatusDto;
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(MAX_COLUMNS)
   @IsString({ each: true })
   @MaxLength(300, { each: true })
   columns?: string[];
+}
+
+class LayerTargetDto {
+  @IsIn(['create', 'replace']) mode: 'create' | 'replace';
+  /** Nome da nova camada (mode = create) */
+  @ValidateIf((o: LayerTargetDto) => o.mode === 'create')
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  name?: string;
+  /** Camada de GeoAnalisysTemp a substituir (mode = replace) */
+  @ValidateIf((o: LayerTargetDto) => o.mode === 'replace') @IsUUID() sourceId?: string;
+  /** Acrescenta/apaga colunas para ficar igual ao resultado (mode = replace) */
+  @IsOptional() @IsBoolean() adjustColumns?: boolean;
+  /** Grava também as coordenadas convertidas (UTM X/Y e zona) */
+  @IsOptional() @IsBoolean() convertCoordinates?: boolean;
+}
+
+class AssociationLayerDto extends AssociationDto {
+  @ValidateNested() @Type(() => LayerTargetDto) target: LayerTargetDto;
+}
+
+function toTarget(dto: LayerTargetDto): AssociationLayerTarget {
+  return dto.mode === 'create'
+    ? { mode: 'create', name: dto.name!, convertCoordinates: dto.convertCoordinates ?? false }
+    : {
+        mode: 'replace',
+        sourceId: dto.sourceId!,
+        adjustColumns: dto.adjustColumns ?? false,
+        convertCoordinates: dto.convertCoordinates ?? false,
+      };
 }
 
 function toRequest(dto: AssociationDto): AssociationRequest {
@@ -138,9 +183,20 @@ export class AssociationController {
   constructor(private readonly association: AssociationService) {}
 
   @Post('preview')
-  @ApiOperation({ summary: 'Associa 1 para 1 os pontos mais próximos de duas camadas (resumo e prévia)' })
+  @ApiOperation({
+    summary: 'Associa 1 para 1 os pontos mais próximos de duas camadas (resumo e prévia)',
+  })
   preview(@Body() dto: AssociationDto) {
     return this.association.preview(toRequest(dto));
+  }
+
+  @Post('layer')
+  @ApiOperation({
+    summary:
+      'Grava o resultado como camada temporária em GeoAnalisysTemp: nova ou substituindo (TRUNCATE) uma existente',
+  })
+  toLayer(@Body() dto: AssociationLayerDto, @CurrentUser() user: string) {
+    return this.association.toLayer(toRequest(dto), toTarget(dto.target), user);
   }
 
   @Post(':format')

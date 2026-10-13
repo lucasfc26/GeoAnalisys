@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query';
-import { FileText, MousePointerClick, Ruler } from 'lucide-react';
+import { FileText, List, MousePointerClick, Ruler } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useSourceSchema, useSources } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
@@ -11,6 +11,7 @@ import {
 } from '@/services/analysis';
 import { triggerDownload } from '@/services/export';
 import { useAppStore } from '@/stores/appStore';
+import { useToolListsStore } from '@/stores/toolListsStore';
 import type { FilterDef } from '@/types';
 import { fmtInt, fmtValue } from '@/utils/format';
 import { boundsOfPoints, fmtDistance } from '@/utils/geo';
@@ -142,16 +143,27 @@ export default function AttributeDistanceDialog() {
   const [result, setResult] = useState<{
     request: AttributeDistanceRequest;
     data: AttributeDistanceResult;
-  } | null>(null);
+  } | null>(() => useToolListsStore.getState().attrDist);
   const run = useMutation({
     mutationFn: (req: AttributeDistanceRequest) => analysisService.attributeDistance(req),
-    onSuccess: (data, req) => setResult({ request: req, data }),
+    onSuccess: (data, req) => {
+      setResult({ request: req, data });
+      useToolListsStore.getState().setAttrDist({ request: req, data });
+    },
     onError: (err) => toast.error(errorMessage(err)),
   });
   const close = () => closeDialog('attributeDistance');
   const summary = result?.data.summary;
   const stale = !!result && !!request && JSON.stringify(result.request) !== JSON.stringify(request);
 
+  /** Lista por valor do atributo sobre o mapa (selecionar, ver e alterar atributos). */
+  const listPoints = () => {
+    if (!result) return;
+    const st = useToolListsStore.getState();
+    st.setAttrDist(result);
+    st.setAttrDistOpen(true);
+    close();
+  };
   const selectFar = () => {
     if (!result) return;
     const pts = result.data.points;
@@ -515,10 +527,20 @@ export default function AttributeDistanceDialog() {
               </>
             )}
             <div className="flex flex-wrap gap-2">
-              {result.data.points.length > 0 && (
+              {result.data.points.length + result.data.noMatch.length > 0 && (
                 <Button
                   size="sm"
                   variant="primary"
+                  icon={<List className="size-3.5" />}
+                  onClick={listPoints}
+                  title="Lista por valor do atributo sobre o mapa: selecionar, ver e alterar atributos"
+                >
+                  Listar pontos
+                </Button>
+              )}
+              {result.data.points.length > 0 && (
+                <Button
+                  size="sm"
                   icon={<MousePointerClick className="size-3.5" />}
                   onClick={selectFar}
                 >

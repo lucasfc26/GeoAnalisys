@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import clsx from 'clsx';
 import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  ListChecks,
   ListOrdered,
   Loader2,
   Maximize2,
@@ -17,7 +19,7 @@ import { queryKeys, useSourceSchema, useSources } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
 import { previewUrl } from '@/lib/listPreview';
 import { pointsService } from '@/services/points';
-import { useAppStore } from '@/stores/appStore';
+import { useAppStore, type ListMode } from '@/stores/appStore';
 import type { ColumnMeta, PointRecord, SelectedGroup } from '@/types';
 import { fmtInt, fmtValue, isUrl } from '@/utils/format';
 import { boundsOfPoints, distanceM, fmtDistance } from '@/utils/geo';
@@ -42,6 +44,27 @@ function zoomFor(mPerCm: number, lat: number) {
   return Math.min(22, Math.max(1, zoomOfScale(metersPerCm(1, lat) / mPerCm)));
 }
 
+/**
+ * Foco do passo. Com `fitAll` e mais de uma coordenada, a extensão inclui todos os pontos.
+ * Caso contrário, um local (ou pontos próximos) usa a escala escolhida; vários espalhados
+ * enquadram todos.
+ */
+export function listStepFocus(
+  groups: { key: string; lat: number; lng: number }[],
+  mPerCm: number,
+  fitAll: boolean,
+) {
+  const b = boundsOfPoints(groups);
+  if (!b) return null;
+  const coords = new Set(groups.map((g) => g.key)).size;
+  if (fitAll && coords > 1) return { bounds: b };
+  const center = { lat: (b.minLat + b.maxLat) / 2, lng: (b.minLng + b.maxLng) / 2 };
+  const span = distanceM({ lat: b.minLat, lng: b.minLng }, { lat: b.maxLat, lng: b.maxLng });
+  // Cabe em ~10 cm de tela na escala escolhida: mantém a escala; senão enquadra todos.
+  if (span <= mPerCm * 10) return { center, zoom: zoomFor(mPerCm, center.lat) };
+  return { bounds: b };
+}
+
 interface Item {
   value: string;
   groups: SelectedGroup[];
@@ -59,6 +82,17 @@ interface ListInput {
 }
 /** Um passo da navegação: o valor de cada lista naquela posição. */
 type Step = ({ list: number; item: Item } | null)[];
+
+/** Grupos de todos os valores juntos (uma coordenada = um grupo, sem IDs repetidos). */
+export function mergeGroups(groups: SelectedGroup[]): SelectedGroup[] {
+  const out = new Map<string, SelectedGroup>();
+  for (const g of groups) {
+    const cur = out.get(g.key);
+    if (cur) cur.ids = [...new Set([...cur.ids, ...g.ids])];
+    else out.set(g.key, { ...g, ids: [...new Set(g.ids)] });
+  }
+  return [...out.values()];
+}
 
 /** Passos pareados por posição; pula as posições em que nenhuma lista tem ponto encontrado. */
 function buildSteps(results: { items: Item[] }[]): Step[] {
@@ -249,12 +283,15 @@ export function ListModePanel({
   windowId,
   sourceId,
   index: windowIndex,
+  initialMode = 'walk',
 }: {
   windowId: string;
   /** Camada desta janela (fixa, mesmo que a camada ativa mude: o estado da janela é mantido) */
   sourceId: string;
   /** Ordem de abertura: janelas novas aparecem deslocadas */
   index: number;
+  /** Ao localizar: percorrer os valores ou selecionar todos os pontos da lista */
+  initialMode?: ListMode;
 }) {
   const closeWindow = useAppStore((s) => s.closeListWindow);
   const setSelection = useAppStore((s) => s.setSelection);
@@ -269,10 +306,13 @@ export function ListModePanel({
   );
   const defaultCol = source?.idColumn || columns[0]?.name || '';
 
+  const [mode, setMode] = useState<ListMode>(initialMode);
   const [lists, setLists] = useState<ListInput[]>([{ id: 1, column: '', text: '' }]);
   const [results, setResults] = useState<{ column: string; items: Item[] }[] | null>(null);
   const [index, setIndex] = useState(0);
   const [scale, setScale] = useState(DEFAULT_SCALE);
+  /** Com várias coordenadas, enquadra todas em vez da escala fixa do controle. */
+  const [fitAll, setFitAll] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showMissing, setShowMissing] = useState(false);
   /** Recolhida: só navegação compacta + tabela de atributos */
@@ -314,18 +354,20 @@ export function ListModePanel({
   };
 
   /**
-   * Seleciona os pontos do passo; um local (ou próximos) usa a escala escolhida, vários espalhados
-   * enquadram todos. Com `all`, inclui também os demais registros das mesmas coordenadas (os
-   * comparados ficam como "principais", em destaque no painel).
+   * Seleciona os pontos do passo e aproxima o mapa. Com `fit`, várias coordenadas entram todas
+   * na tela; senão vale a escala do controle (pontos muito espalhados ainda são enquadrados).
+   * Com `all`, inclui também os demais registros das mesmas coordenadas (os comparados ficam
+   * como "principais", em destaque no painel).
    */
   const go = useCallback(
-    (i: number, scaleIdx = scale, list = steps, all = sameCoord) => {
+    (i: number, scaleIdx = scale, list = steps, all = sameCoord, fit = fitAll) => {
       const s = list[i];
       if (!s) return;
       setIndex(i);
+      setMode('walk');
       const groups = s.flatMap((e) => e?.item.groups ?? []);
-      const b = boundsOfPoints(groups);
-      if (!b) return;
+      const focus = listStepFocus(groups, SCALES[scaleIdx], fit);
+      if (!focus) return;
       const primary = groups.flatMap((g) => g.ids);
       const req = ++request.current;
       // A seleção vale para a camada ativa: seleciona nesta camada, tornando-a ativa.
@@ -345,14 +387,29 @@ export function ListModePanel({
           })
           .catch((err) => toast.error(errorMessage(err)));
       }
-      const center = { lat: (b.minLat + b.maxLat) / 2, lng: (b.minLng + b.maxLng) / 2 };
-      const span = distanceM({ lat: b.minLat, lng: b.minLng }, { lat: b.maxLat, lng: b.maxLng });
-      // Cabe em ~10 cm de tela na escala escolhida: mantém a escala; senão enquadra todos.
-      if (span <= SCALES[scaleIdx] * 10)
-        focusMap({ center, zoom: zoomFor(SCALES[scaleIdx], center.lat) });
-      else focusMap({ bounds: b });
+      focusMap(focus);
     },
-    [scale, steps, sameCoord, sourceId, setSource, setSelection, focusMap],
+    [scale, steps, sameCoord, fitAll, sourceId, setSource, setSelection, focusMap],
+  );
+
+  // Todos os pontos encontrados, de todos os valores de todas as listas.
+  const allGroups = useMemo(
+    () => mergeGroups(results?.flatMap((r) => r.items.flatMap((i) => i.groups)) ?? []),
+    [results],
+  );
+  const allCount = useMemo(() => allGroups.reduce((n, g) => n + g.ids.length, 0), [allGroups]);
+
+  /** Seleciona de uma vez os pontos de todos os valores e enquadra o mapa neles. */
+  const selectAll = useCallback(
+    (groups = allGroups) => {
+      if (!groups.length) return;
+      ++request.current;
+      if (useAppStore.getState().sourceId !== sourceId) setSource(sourceId);
+      setSelection(groups, 'replace');
+      const b = boundsOfPoints(groups);
+      if (b) focusMap({ bounds: b });
+    },
+    [allGroups, sourceId, setSource, setSelection, focusMap],
   );
 
   const load = async () => {
@@ -379,11 +436,15 @@ export function ListModePanel({
         (n, r) => n + r.items.filter((i) => absentOf(i) && !i.removed).length,
         0,
       );
+      const extra = `${rem ? ` · ${fmtInt(rem)} removido(s)` : ''}${miss ? ` · ${fmtInt(miss)} valor(es) não encontrado(s)` : ''}`;
       if (!next.length) toast.info('Nenhum dos valores foi encontrado.');
-      else {
-        toast.success(
-          `${fmtInt(next.length)} posição(ões) para percorrer${rem ? ` · ${fmtInt(rem)} removido(s)` : ''}${miss ? ` · ${fmtInt(miss)} valor(es) não encontrado(s)` : ''}.`,
-        );
+      else if (mode === 'all') {
+        const groups = mergeGroups(res.flatMap((r) => r.items.flatMap((i) => i.groups)));
+        const count = groups.reduce((n, g) => n + g.ids.length, 0);
+        toast.success(`${fmtInt(count)} ponto(s) selecionado(s)${extra}.`);
+        selectAll(groups);
+      } else {
+        toast.success(`${fmtInt(next.length)} posição(ões) para percorrer${extra}.`);
         go(0, scale, next);
       }
     } catch (err) {
@@ -579,6 +640,35 @@ export function ListModePanel({
         <div onPointerDownCapture={claimKeyboard} onFocusCapture={claimKeyboard}>
           {!results ? (
             <div className="space-y-3 p-3">
+              <div
+                role="radiogroup"
+                aria-label="Ao localizar"
+                className="grid grid-cols-2 gap-1 rounded-md bg-slate-100 p-0.5 text-xs"
+              >
+                {(
+                  [
+                    ['walk', 'Percorrer valores', ListOrdered],
+                    ['all', 'Selecionar todos', ListChecks],
+                  ] as const
+                ).map(([m, label, Icon]) => (
+                  <button
+                    key={m}
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === m}
+                    onClick={() => setMode(m)}
+                    className={clsx(
+                      'inline-flex items-center justify-center gap-1.5 rounded px-2 py-1 font-medium',
+                      mode === m
+                        ? 'bg-white text-accent-700 shadow-sm'
+                        : 'text-slate-600 hover:text-slate-900',
+                    )}
+                  >
+                    <Icon className="size-3.5" />
+                    {label}
+                  </button>
+                ))}
+              </div>
               {lists.map((l, i) => (
                 <div key={l.id} className="space-y-1">
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
@@ -618,7 +708,9 @@ export function ListModePanel({
               ))}
               <p className="text-[11px] text-slate-400">
                 Um valor por linha, ou separados por vírgula, ponto e vírgula ou espaço.
-                {multi && ' As listas são comparadas por posição: 1º com 1º, 2º com 2º…'}
+                {mode === 'all'
+                  ? ' Seleciona de uma vez os pontos de todos os valores.'
+                  : multi && ' As listas são comparadas por posição: 1º com 1º, 2º com 2º…'}
               </p>
               <div className="flex items-center justify-between gap-2">
                 <Button
@@ -642,7 +734,7 @@ export function ListModePanel({
                   loading={loading}
                   disabled={parsed.every((p) => !p.length)}
                 >
-                  Localizar
+                  {mode === 'all' ? 'Selecionar todos' : 'Localizar'}
                 </Button>
               </div>
             </div>
@@ -699,6 +791,35 @@ export function ListModePanel({
                 <p className="text-sm text-slate-500">Nenhum valor encontrado.</p>
               )}
 
+              {allCount > 0 && (
+                <div className="flex items-center justify-between gap-2 text-xs text-slate-600">
+                  <span>
+                    {fmtInt(allCount)} ponto(s) em {fmtInt(steps.length)} posição(ões)
+                  </span>
+                  <span className="flex gap-1">
+                    <Button
+                      size="sm"
+                      variant={mode === 'all' ? 'primary' : 'secondary'}
+                      icon={<ListChecks className="size-3.5" />}
+                      onClick={() => {
+                        setMode('all');
+                        selectAll();
+                      }}
+                    >
+                      Selecionar todos
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={mode === 'walk' ? 'primary' : 'secondary'}
+                      icon={<ListOrdered className="size-3.5" />}
+                      onClick={() => go(index)}
+                    >
+                      Percorrer
+                    </Button>
+                  </span>
+                </div>
+              )}
+
               {!collapsed && (
                 <label className="flex items-start gap-2 text-xs text-slate-700">
                   <input
@@ -706,7 +827,7 @@ export function ListModePanel({
                     checked={sameCoord}
                     onChange={(e) => {
                       setSameCoord(e.target.checked);
-                      if (step) go(index, scale, steps, e.target.checked);
+                      if (step && mode === 'walk') go(index, scale, steps, e.target.checked);
                     }}
                     className="mt-0.5 accent-accent-600"
                   />
@@ -750,9 +871,31 @@ export function ListModePanel({
               )}
 
               {!collapsed && (
+                <label className="flex items-start gap-2 text-xs text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={fitAll}
+                    onChange={(e) => {
+                      const fit = e.target.checked;
+                      setFitAll(fit);
+                      if (step && mode === 'walk') go(index, scale, steps, sameCoord, fit);
+                    }}
+                    className="mt-0.5 accent-accent-600"
+                  />
+                  <span>
+                    Enquadrar todas as coordenadas
+                    <span className="block text-[11px] text-slate-400">
+                      Com mais de uma coordenada, ajusta o zoom para todos os pontos aparecerem na
+                      tela, em vez da escala fixa.
+                    </span>
+                  </span>
+                </label>
+              )}
+
+              {!collapsed && (
                 <label className="block text-xs text-slate-600">
                   <span className="flex justify-between">
-                    <span>Aproximação</span>
+                    <span>Aproximação{fitAll ? ' (uma coordenada)' : ''}</span>
                     <b className="text-slate-800">1 cm ≈ {fmtDistance(SCALES[scale])}</b>
                   </span>
                   <input
@@ -764,7 +907,7 @@ export function ListModePanel({
                     onChange={(e) => {
                       const s = Number(e.target.value);
                       setScale(s);
-                      if (step) go(index, s);
+                      if (step && mode === 'walk') go(index, s);
                     }}
                     className="mt-1 w-full accent-accent-600"
                   />

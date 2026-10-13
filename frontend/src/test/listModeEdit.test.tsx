@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { EditableCell } from '@/components/map/ListModePanel';
+import { EditableCell, listStepFocus, mergeGroups } from '@/components/map/ListModePanel';
 import type { ColumnMeta } from '@/types';
 
 const col = (name: string, kind: ColumnMeta['kind']): ColumnMeta => ({
@@ -57,5 +57,54 @@ describe('Modo lista · célula editável', () => {
     fireEvent.doubleClick(screen.getByText('LD'));
     await act(async () => fireEvent.blur(screen.getByDisplayValue('LD')));
     expect(onSave).not.toHaveBeenCalled();
+  });
+});
+
+const pt = (key: string, lat: number, lng: number) => ({ key, lat, lng });
+
+describe('Modo lista · zoom do passo', () => {
+  it('com o enquadramento ligado e várias coordenadas, mostra a extensão de todas', () => {
+    const focus = listStepFocus(
+      [pt('a', -23.55, -46.63), pt('b', -23.56, -46.64)],
+      10,
+      true,
+    );
+    expect(focus).toMatchObject({
+      bounds: { minLat: -23.56, maxLat: -23.55, minLng: -46.64, maxLng: -46.63 },
+    });
+  });
+
+  it('com uma coordenada, mantém a escala do controle mesmo com o enquadramento ligado', () => {
+    const focus = listStepFocus([pt('a', -23.55, -46.63)], 10, true);
+    expect(focus).toHaveProperty('zoom');
+    expect(focus).toHaveProperty('center');
+    expect(focus).not.toHaveProperty('bounds');
+  });
+
+  it('sem o enquadramento, pontos próximos usam a escala fixa', () => {
+    const focus = listStepFocus(
+      [pt('a', -23.55, -46.63), pt('b', -23.55001, -46.63001)],
+      10,
+      false,
+    );
+    expect(focus).toHaveProperty('zoom');
+  });
+
+  it('sem o enquadramento, pontos distantes enquadram todos', () => {
+    const focus = listStepFocus(
+      [pt('a', -23.55, -46.63), pt('b', -23.7, -46.8)],
+      10,
+      false,
+    );
+    expect(focus).toHaveProperty('bounds');
+  });
+});
+
+describe('Modo lista · selecionar todos', () => {
+  it('junta os pontos de todos os valores por coordenada, sem IDs repetidos', () => {
+    const g = (key: string, ids: string[]) => ({ key, x: 1, y: 2, lat: 0, lng: 0, ids });
+    expect(
+      mergeGroups([g('a', ['1', '2']), g('b', ['3']), g('a', ['2', '4']), g('b', ['3'])]),
+    ).toEqual([g('a', ['1', '2', '4']), g('b', ['3'])]);
   });
 });

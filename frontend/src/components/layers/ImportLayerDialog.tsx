@@ -56,6 +56,10 @@ export default function ImportLayerDialog() {
   const [idColumn, setIdColumn] = useState('');
   const [xColumn, setXColumn] = useState('');
   const [yColumn, setYColumn] = useState('');
+  /** 'xy' = X e Y em colunas separadas; 'pair' = as duas na mesma célula */
+  const [coordMode, setCoordMode] = useState<'xy' | 'pair'>('xy');
+  const [coordColumn, setCoordColumn] = useState('');
+  const [convertCoords, setConvertCoords] = useState(true);
   const [crs, setCrs] = useState('');
   const [labelColumn, setLabelColumn] = useState('');
   const [categoryColumn, setCategoryColumn] = useState('');
@@ -74,6 +78,8 @@ export default function ImportLayerDialog() {
       setIdColumn(p.suggested.idColumn ?? '');
       setXColumn(p.suggested.xColumn ?? '');
       setYColumn(p.suggested.yColumn ?? '');
+      setCoordColumn(p.suggested.coordColumn ?? '');
+      setCoordMode(p.suggested.coordColumn ? 'pair' : 'xy');
       setLabelColumn('');
       setCategoryColumn('');
       if (p.suggested.coordinateSystem) setCrs(p.suggested.coordinateSystem);
@@ -102,8 +108,10 @@ export default function ImportLayerDialog() {
         name: name.trim(),
         schema: schemaValue,
         idColumn: idColumn || null,
-        xColumn,
-        yColumn,
+        xColumn: coordMode === 'xy' ? xColumn : null,
+        yColumn: coordMode === 'xy' ? yColumn : null,
+        coordColumn: coordMode === 'pair' ? coordColumn : null,
+        convertCoordinates: convertCoords,
         coordinateSystem: crs,
         labelColumn: labelColumn || null,
         categoryColumn: categoryColumn || null,
@@ -137,10 +145,10 @@ export default function ImportLayerDialog() {
     !!preview &&
     !!name.trim() &&
     !!schemaValue &&
-    !!xColumn &&
-    !!yColumn &&
-    xColumn !== yColumn &&
+    (coordMode === 'pair' ? !!coordColumn : !!xColumn && !!yColumn && xColumn !== yColumn) &&
     !!crs;
+  const crsKind = crsList.data?.find((c) => c.code === crs)?.kind;
+  const coordCols = coordMode === 'pair' ? [coordColumn] : [xColumn, yColumn];
   const colOptions = (allowEmpty: string | null) => (
     <>
       {allowEmpty !== null && <option value="">{allowEmpty}</option>}
@@ -276,17 +284,45 @@ export default function ImportLayerDialog() {
                 </Select>
               </div>
               <div>
-                <Label htmlFor="imp-x">Coluna X (leste / longitude)</Label>
-                <Select id="imp-x" value={xColumn} onChange={(e) => setXColumn(e.target.value)}>
-                  {colOptions('— escolha —')}
+                <Label htmlFor="imp-mode">Coordenadas</Label>
+                <Select
+                  id="imp-mode"
+                  value={coordMode}
+                  onChange={(e) => setCoordMode(e.target.value as 'xy' | 'pair')}
+                >
+                  <option value="xy">X e Y em colunas separadas</option>
+                  <option value="pair">X e Y juntos numa coluna</option>
                 </Select>
               </div>
-              <div>
-                <Label htmlFor="imp-y">Coluna Y (norte / latitude)</Label>
-                <Select id="imp-y" value={yColumn} onChange={(e) => setYColumn(e.target.value)}>
-                  {colOptions('— escolha —')}
-                </Select>
-              </div>
+              {coordMode === 'xy' ? (
+                <>
+                  <div>
+                    <Label htmlFor="imp-x">Coluna X (leste / longitude)</Label>
+                    <Select id="imp-x" value={xColumn} onChange={(e) => setXColumn(e.target.value)}>
+                      {colOptions('— escolha —')}
+                    </Select>
+                  </div>
+                  <div>
+                    <Label htmlFor="imp-y">Coluna Y (norte / latitude)</Label>
+                    <Select id="imp-y" value={yColumn} onChange={(e) => setYColumn(e.target.value)}>
+                      {colOptions('— escolha —')}
+                    </Select>
+                  </div>
+                </>
+              ) : (
+                <div className="sm:col-span-2">
+                  <Label htmlFor="imp-pair" hint='ex.: "-3,84, -38,40" ou "566160 9575107"'>
+                    Coluna com as coordenadas
+                  </Label>
+                  <Select
+                    id="imp-pair"
+                    value={coordColumn}
+                    onChange={(e) => setCoordColumn(e.target.value)}
+                  >
+                    {colOptions('— escolha —')}
+                  </Select>
+                </div>
+              )}
               <div>
                 <Label htmlFor="imp-crs">Sistema de coordenadas</Label>
                 <Select id="imp-crs" value={crs} onChange={(e) => setCrs(e.target.value)}>
@@ -324,9 +360,30 @@ export default function ImportLayerDialog() {
                 </Select>
               </div>
             </div>
-            {xColumn && xColumn === yColumn && (
+            {coordMode === 'xy' && xColumn && xColumn === yColumn && (
               <p className="text-xs text-red-600">X e Y devem ser colunas diferentes.</p>
             )}
+            <div className="space-y-1 rounded-md bg-slate-50 p-2 text-[11px] text-slate-600">
+              <p>
+                Formatos reconhecidos: decimal com vírgula ou ponto (-3,8438 · 566160,53), graus,
+                minutos e segundos (3º 50' 37,9" S · 38°24'14.8"W · S 3 50 37), graus e minutos (3°
+                50,63' S) e, na mesma célula, pares separados por vírgula, ponto e vírgula, espaço
+                ou barra, além de POINT(x y). Textos em graus ficam como estão e o valor decimal vai
+                para colunas novas.
+              </p>
+              <label className="flex items-center gap-2 text-xs text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={convertCoords}
+                  onChange={(e) => setConvertCoords(e.target.checked)}
+                />
+                {crsKind === 'geographic'
+                  ? 'Gravar também UTM X, UTM Y e a zona UTM de cada ponto (colunas utm_x, utm_y, utm_zona)'
+                  : crsKind === 'utm'
+                    ? 'Gravar também latitude e longitude de cada ponto (colunas latitude, longitude)'
+                    : 'Gravar também as coordenadas convertidas (latitude/longitude e UTM)'}
+              </label>
+            </div>
 
             <div>
               <p className="mb-1.5 text-xs text-slate-500">
@@ -344,7 +401,7 @@ export default function ImportLayerDialog() {
                           className="px-2 py-1.5 align-top font-semibold whitespace-nowrap text-slate-700"
                         >
                           <div>{h}</div>
-                          {h === xColumn || h === yColumn ? (
+                          {coordCols.includes(h) ? (
                             <span className="text-[11px] font-normal text-amber-700">
                               coordenada
                             </span>

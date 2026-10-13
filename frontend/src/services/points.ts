@@ -124,6 +124,29 @@ export const pointsService = {
   replace: (sourceId: string, filters: FilterDef[], changes: Record<string, unknown>) =>
     api.patch<{ updated: number }>('/points/replace', { sourceId, filters, changes }),
 
+  /** Duplica os registros em outra camada, na mesma posição; `mapping`: origem → destino (null = não copiar). */
+  copyToSource: (
+    sourceId: string,
+    ids: string[],
+    targetId: string,
+    mapping: Record<string, string | null>,
+    observation: string,
+  ) =>
+    api.post<{
+      count: number;
+      /** Sem posição válida no sistema de coordenadas do destino */
+      skipped: number;
+      /** Valores que não cabiam no tipo da coluna de destino (ficaram vazios), por coluna */
+      invalid: Record<string, number>;
+      targetId: string;
+      targetName: string;
+      groups: SelectedGroup[];
+    }>('/points/copy-to-source', { sourceId, ids, targetId, mapping, observation }),
+
+  /** Amostra de registros (dados completos), para comparar valores. */
+  sample: (sourceId: string, pageSize = 100) =>
+    api.get<{ items: PointRecord[] }>(`/points${qs({ sourceId, pageSize })}`),
+
   translate: (
     sourceId: string,
     ids: string[],

@@ -17,10 +17,11 @@ import { queryKeys, useSourceSchema } from '@/hooks/useSourceData';
 import { api, qs } from '@/lib/api';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
-import { fmtCoord, fmtDeg, fmtValue, isUrl } from '@/utils/format';
+import { fmtValue, isUrl } from '@/utils/format';
 import { applyOrder, moveItem } from '@/utils/list';
 import { Button } from '../ui/Button';
 import { ErrorState, SkeletonList } from '../ui/States';
+import { CoordinateGrid } from './CoordinateGrid';
 
 interface AuditItem {
   id: string;
@@ -106,7 +107,6 @@ export function RecordDetails({ sourceId, id }: { sourceId: string; id: string }
   if (!q.data) return null;
   const rec = q.data;
   const src = schema.data?.source;
-  const isUtm = schema.data?.crs.kind === 'utm';
 
   return (
     <div className="space-y-4">
@@ -129,22 +129,12 @@ export function RecordDetails({ sourceId, id }: { sourceId: string; id: string }
           <dt className="text-slate-500">{src?.idColumn ?? 'ID'}</dt>
           <dd className="font-mono text-sm font-semibold text-slate-900">{rec.id}</dd>
         </div>
-        <div>
-          <dt className="text-slate-500">{isUtm ? 'UTM X' : 'X'} <span className="text-slate-400">({src?.xColumn})</span></dt>
-          <dd className="font-mono text-slate-800">{fmtCoord(rec.x)}</dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">{isUtm ? 'UTM Y' : 'Y'} <span className="text-slate-400">({src?.yColumn})</span></dt>
-          <dd className="font-mono text-slate-800">{fmtCoord(rec.y)}</dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Latitude</dt>
-          <dd className="font-mono text-slate-800">{fmtDeg(rec.lat)}</dd>
-        </div>
-        <div>
-          <dt className="text-slate-500">Longitude</dt>
-          <dd className="font-mono text-slate-800">{fmtDeg(rec.lng)}</dd>
-        </div>
+        <CoordinateGrid
+          point={rec}
+          crs={schema.data?.crs}
+          xColumn={src?.xColumn}
+          yColumn={src?.yColumn}
+        />
       </dl>
 
       <div>

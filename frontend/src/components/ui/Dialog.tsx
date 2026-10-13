@@ -34,7 +34,10 @@ export function Dialog({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCloseRef.current();
+      if (e.key !== 'Escape') return;
+      // Com uma janela aberta sobre outra, o Esc fecha só a de cima.
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      if (dialogs[dialogs.length - 1] === ref.current) onCloseRef.current();
     };
     window.addEventListener('keydown', onKey);
     // Foco na janela só ao abrir, e sem tirar de um campo que já esteja focado dentro dela.

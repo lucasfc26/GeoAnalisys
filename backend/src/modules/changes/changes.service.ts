@@ -9,6 +9,7 @@ import {
   ChangeAction,
   ChangeEntry,
   attributeColumns,
+  concatObservation,
   mergeUpdate,
   observationLabel,
   xlsxValue,
@@ -70,12 +71,45 @@ export class ChangesService {
     );
   }
 
-  async logDelete(tx: Db, ctx: SourceContext, ids: string[], observation?: string | null) {
+  /**
+   * Remoções. A linha guarda todos os atributos e valores do ponto (só para desfazer a remoção:
+   * não aparecem na tabela nem no XLSX).
+   */
+  async logDelete(
+    tx: Db,
+    ctx: SourceContext,
+    removed: { id: string; data: Record<string, unknown> }[],
+    observation?: string | null,
+  ) {
+    const order = this.order(ctx);
     await this.put(
       tx,
       ctx,
-      ids.map((id) => this.plain(id, 'DELETE', observation)),
+      removed.map((r) => {
+        const attributes = order.filter((k) => k in r.data);
+        return {
+          ...this.plain(r.id, 'DELETE', observation),
+          attributes,
+          old_values: attributes.map((k) => r.data[k] ?? null),
+        };
+      }),
     );
+  }
+
+  /** Atributos e valores guardados na remoção do ponto (vazio se a linha não tem). */
+  async removedSnapshot(ctx: SourceContext, recordId: string): Promise<Record<string, unknown>> {
+    const project = projectFilter('project_id', 3);
+    const [row] = await this.prisma.$queryRawUnsafe<
+      { attributes: string[] | null; old_values: unknown[] | null }[]
+    >(
+      `SELECT attributes, old_values FROM alteracoes
+        WHERE source_id = $1 AND record_id = $2 AND action = 'DELETE' AND ${project.sql}`,
+      ctx.source.id,
+      recordId,
+      ...project.params,
+    );
+    const attrs = row?.attributes ?? [];
+    return Object.fromEntries(attrs.map((a, i) => [a, row?.old_values?.[i] ?? null]));
   }
 
   /** Edições (antes → depois) mescladas com o que já houver na tabela para cada ponto. */
@@ -88,17 +122,19 @@ export class ChangesService {
     const order = this.order(ctx);
     const project = projectFilter('project_id', 3);
     const existing = new Map<string, ChangeEntry>();
+    const observations = new Map<string, string | null>();
     for (let i = 0; i < changes.length; i += CHUNK) {
       const rows = await tx.$queryRawUnsafe<
         {
           record_id: string;
           action: ChangeAction;
+          observation: string | null;
           attributes: string[];
           old_values: unknown[] | null;
           new_values: unknown[] | null;
         }[]
       >(
-        `SELECT record_id, action, attributes, old_values, new_values FROM alteracoes
+        `SELECT record_id, action, observation, attributes, old_values, new_values FROM alteracoes
           WHERE source_id = $1 AND record_id = ANY($2::text[]) AND ${project.sql}`,
         ctx.source.id,
         changes.slice(i, i + CHUNK).map((c) => c.id),
@@ -111,22 +147,28 @@ export class ChangesService {
           oldValues: r.old_values ?? [],
           newValues: r.new_values ?? [],
         });
+        observations.set(r.record_id, r.observation);
       }
     }
     const puts: PutRow[] = [];
     const removes: string[] = [];
     for (const c of changes) {
       const prev = existing.get(c.id);
-      const r = mergeUpdate(prev, c.before, c.after, order);
+      const observation = observations.get(c.id)?.trim() || null;
+      let r = mergeUpdate(prev, c.before, c.after, order);
       if (r === 'keep') continue;
+      // Sem diferenças, a linha some — a não ser que tenha uma observação digitada.
+      if (r === null && observation) {
+        r = { action: 'UPDATE', attributes: [], oldValues: [], newValues: [] };
+      }
       if (r === null) {
         if (prev) removes.push(c.id);
         continue;
       }
       puts.push({
         record_id: c.id,
-        action: 'UPDATE',
-        observation: null,
+        action: r.action,
+        observation,
         attributes: r.attributes,
         old_values: r.oldValues,
         new_values: r.newValues,
@@ -214,8 +256,97 @@ export class ChangesService {
     }
   }
 
+  /** Remove as linhas dos pontos (desfeitos na mesma transação da edição). */
+  async forget(tx: Db, ctx: SourceContext, recordIds: string[]) {
+    const project = projectFilter('project_id', 3);
+    for (let i = 0; i < recordIds.length; i += CHUNK) {
+      await tx.$executeRawUnsafe(
+        `DELETE FROM alteracoes WHERE source_id = $1 AND record_id = ANY($2::text[]) AND ${project.sql}`,
+        ctx.source.id,
+        recordIds.slice(i, i + CHUNK),
+        ...project.params,
+      );
+    }
+  }
+
+  /**
+   * Acrescenta uma observação à linha do ponto; sem linha, cria uma de alteração só com a
+   * observação (anotação manual).
+   */
+  async appendObservation(tx: Db, ctx: SourceContext, recordId: string, observation: string) {
+    const project = projectFilter('project_id', 3);
+    const [row] = await tx.$queryRawUnsafe<{ action: ChangeAction; observation: string | null }[]>(
+      `SELECT action, observation FROM alteracoes
+        WHERE source_id = $1 AND record_id = $2 AND ${project.sql}`,
+      ctx.source.id,
+      recordId,
+      ...project.params,
+    );
+    if (!row) {
+      await this.put(tx, ctx, [this.plain(recordId, 'UPDATE', observation)]);
+      return;
+    }
+    const merged = concatObservation(row.observation, observation);
+    if (merged === row.observation) return;
+    const upd = projectFilter('project_id', 4);
+    await tx.$executeRawUnsafe(
+      `UPDATE alteracoes SET observation = $3, updated_at = now()
+        WHERE source_id = $1 AND record_id = $2 AND ${upd.sql}`,
+      ctx.source.id,
+      recordId,
+      merged,
+      ...upd.params,
+    );
+  }
+
+  /** Linhas do projeto aberto pelos ids da Tabela de Alterações. */
+  async rows(ids: string[]): Promise<ChangeRow[]> {
+    if (!ids.length) return [];
+    return this.select((p) => `c.id = ANY($${p}::bigint[])`, [ids]);
+  }
+
+  /** Limpa linhas da tabela (os pontos não mudam). */
+  async forgetRows(ids: string[]) {
+    const project = projectFilter('project_id', 2);
+    const deleted = await this.prisma.$executeRawUnsafe(
+      `DELETE FROM alteracoes WHERE id = ANY($1::bigint[]) AND ${project.sql}`,
+      ids,
+      ...project.params,
+    );
+    return { deleted };
+  }
+
+  /** Troca (ou, com `append`, acrescenta) a observação das linhas. */
+  async setObservation(ids: string[], observation: string, append: boolean) {
+    const project = projectFilter('project_id', 3);
+    const text = observation.trim() || null;
+    const value = append
+      ? `CASE WHEN $2::text IS NULL THEN observation
+              WHEN COALESCE(btrim(observation), '') = '' THEN $2::text
+              WHEN $2::text = ANY(string_to_array(regexp_replace(observation, '\\s*;\\s*', ';', 'g'), ';')) THEN observation
+              ELSE observation || '; ' || $2::text END`
+      : '$2::text';
+    const updated = await this.prisma.$executeRawUnsafe(
+      `UPDATE alteracoes SET observation = ${value}, updated_at = now()
+        WHERE id = ANY($1::bigint[]) AND ${project.sql}`,
+      ids,
+      text,
+      ...project.params,
+    );
+    return { updated };
+  }
+
   async list(): Promise<ChangeRow[]> {
+    return this.select();
+  }
+
+  /** Linhas do projeto aberto; `where` recebe o número do primeiro parâmetro de `params`. */
+  private async select(
+    where?: (firstParam: number) => string,
+    params: unknown[] = [],
+  ): Promise<ChangeRow[]> {
     const project = projectFilter('c.project_id', 1);
+    const extra = where ? ` AND ${where(project.params.length + 1)}` : '';
     const rows = await this.prisma.$queryRawUnsafe<
       {
         id: string;
@@ -235,16 +366,22 @@ export class ChangesService {
               d."idColumn" AS "idColumn", c.record_id AS "recordId", c.action, c.observation, c.attributes,
               c.old_values AS "oldValues", c.new_values AS "newValues", c.updated_at AS "updatedAt"
          FROM alteracoes c LEFT JOIN data_source d ON d.id = c.source_id
-        WHERE ${project.sql}
+        WHERE ${project.sql}${extra}
         ORDER BY c.updated_at DESC, c.id DESC`,
       ...project.params,
+      ...params,
     );
-    return rows.map((r) => ({
-      ...r,
-      attributes: r.attributes ?? [],
-      oldValues: r.oldValues ?? [],
-      newValues: r.newValues ?? [],
-    }));
+    // Remoções: os atributos guardados servem só para desfazer; não saem daqui.
+    return rows.map((r) =>
+      r.action === 'DELETE'
+        ? { ...r, attributes: [], oldValues: [], newValues: [] }
+        : {
+            ...r,
+            attributes: r.attributes ?? [],
+            oldValues: r.oldValues ?? [],
+            newValues: r.newValues ?? [],
+          },
+    );
   }
 
   /** Limpa só as alterações do projeto aberto. */

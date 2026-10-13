@@ -4,6 +4,13 @@
  * (KML é convertido para GeoJSON no navegador antes do envio).
  */
 import ExcelJS from 'exceljs';
+import {
+  looksAngular,
+  pairLooksGeographic,
+  pairToXY,
+  parseCoordValue,
+  splitCoordPair,
+} from '../../common/coords';
 
 export type ImportType = 'integer' | 'number' | 'text';
 export type Cell = string | number | boolean | null;
@@ -175,7 +182,10 @@ function lineMidpoint(line: Position[]): Position | null {
 
 const average = (pts: Position[]): Position | null =>
   pts.length
-    ? [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length]
+    ? [
+        pts.reduce((s, p) => s + p[0], 0) / pts.length,
+        pts.reduce((s, p) => s + p[1], 0) / pts.length,
+      ]
     : null;
 
 /**
@@ -246,7 +256,8 @@ export function geoJsonToSheet(text: string): { sheet: Sheet; xColumn: string; y
     features = input.features as Feat[];
   else if (input?.type === 'Feature') features = [input as Feat];
   else if (typeof input?.type === 'string') features = [{ geometry: input as Geometry }];
-  else throw new Error('Arquivo GeoJSON inválido (esperado FeatureCollection, Feature ou geometria)');
+  else
+    throw new Error('Arquivo GeoJSON inválido (esperado FeatureCollection, Feature ou geometria)');
   if (!features.length) throw new Error('O GeoJSON não tem feições');
 
   const keys: string[] = [];
@@ -295,6 +306,42 @@ export function cleanHeaders(raw: Cell[]): string[] {
     seen.add(name.toLowerCase());
     return name;
   });
+}
+
+/** Corta o texto para caber em `max` bytes UTF-8 (o PostgreSQL limita identificadores a 63 bytes). */
+function fitBytes(s: string, max: number): string {
+  const chars = Array.from(s);
+  while (Buffer.byteLength(chars.join('')) > max) chars.pop();
+  return chars.join('');
+}
+
+/**
+ * Nomes de coluna a partir de cabeçalhos já montados (ex.: resultado de uma ferramenta): sem vazios
+ * nem repetidos e com no máximo 60 bytes, para o nome gravado no banco ser exatamente este.
+ */
+export function columnNamesFrom(headers: string[]): string[] {
+  const seen = new Set<string>();
+  return headers.map((h, i) => {
+    const base =
+      fitBytes(
+        String(h ?? '')
+          .trim()
+          .replace(/\s+/g, ' '),
+        60,
+      ) || `coluna_${i + 1}`;
+    let name = base;
+    for (let n = 2; seen.has(name.toLowerCase()); n++) name = `${fitBytes(base, 56)}_${n}`;
+    seen.add(name.toLowerCase());
+    return name;
+  });
+}
+
+/** `base` (ou base_2, base_3…) sem repetir nenhum nome de `taken`, que passa a incluí-lo. */
+export function freeName(base: string, taken: Set<string>): string {
+  let name = base;
+  for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${base}_${n}`;
+  taken.add(name.toLowerCase());
+  return name;
 }
 
 /** Primeira linha = cabeçalho; demais linhas com o mesmo número de colunas. */
@@ -363,53 +410,175 @@ export function convert(
   return { value: n, invalid: false };
 }
 
+/**
+ * Valor lido do banco (ex.: resultado de uma ferramenta) para uma coluna do tipo: inteiros em texto
+ * passam como texto (sem perder dígitos de bigint); o resto é convertido como na importação.
+ */
+export function tableValue(
+  v: unknown,
+  type: ImportType,
+): { value: string | number | null; invalid: boolean } {
+  if (v === null || v === undefined) return { value: null, invalid: false };
+  let cell: unknown = v;
+  if (typeof cell === 'bigint') cell = cell.toString();
+  else if (cell instanceof Date) cell = cell.toISOString();
+  else if (typeof cell === 'object') cell = JSON.stringify(cell);
+  if (type === 'integer' && typeof cell === 'string' && /^-?\d{1,18}$/.test(cell.trim()))
+    return { value: cell.trim(), invalid: false };
+  return convert(cell as Cell, type);
+}
+
 const X_NAMES = [
-  /^utm[_ ]?x$/i,
+  /^utm[_ ]?(x|e|leste)$/i,
   /^x$/i,
-  /^(leste|este|easting|coord[_ ]?x)$/i,
+  /^(leste|este|easting|coord[_ ]?x|x[_ ]?utm|e[_ ]?utm)$/i,
   /^(longitude|lon|lng|long)$/i,
+  /^(longitude|lon|lng|long)(?![a-z])/i,
+  /^(x|utm[_ ]?x)(?![a-z])/i,
 ];
-const Y_NAMES = [/^utm[_ ]?y$/i, /^y$/i, /^(norte|northing|coord[_ ]?y)$/i, /^(latitude|lat)$/i];
+const Y_NAMES = [
+  /^utm[_ ]?(y|n|norte)$/i,
+  /^y$/i,
+  /^(norte|northing|coord[_ ]?y|y[_ ]?utm|n[_ ]?utm)$/i,
+  /^(latitude|lat)$/i,
+  /^(latitude|lat)(?![a-z])/i,
+  /^(y|utm[_ ]?y)(?![a-z])/i,
+];
+/** Coluna com o par de coordenadas junto ("-3.84, -38.40", "POINT(…)", GMS…) */
+const PAIR_NAMES =
+  /coord|lat\W*lo?ng|lo?ng\W*lat|localiza|posi[cç]|geoloc|ponto|point|wkt|geom|gps|latlon/i;
 const ID_NAMES = [/^(id|idd|gid|fid)$/i, /^(codigo|código|cod)$/i];
 
-/** Sugestões de colunas (ID, X, Y) e do tipo de coordenada, pelos nomes e pelos valores. */
+/** Parte das amostras não vazias de uma coluna que passa no teste (0 se não houver amostras). */
+function share(sheet: Sheet, c: number, test: (v: Cell) => boolean): number {
+  let n = 0;
+  let ok = 0;
+  for (const r of sheet.rows.slice(0, 200)) {
+    const v = r[c];
+    if (v === null || v === '') continue;
+    n++;
+    if (test(v)) ok++;
+  }
+  return n ? ok / n : 0;
+}
+
+/** Valores da coluna lidos como coordenada (decimal com vírgula/ponto ou graus/minutos/segundos). */
+function coordSample(sheet: Sheet, c: number): number[] {
+  return sheet.rows
+    .slice(0, 200)
+    .map((r) => parseCoordValue(r[c]))
+    .filter((n): n is number => n !== null);
+}
+
+/**
+ * Sugestões de colunas (ID, X, Y — ou uma coluna com o par) e do tipo de coordenada, pelos nomes e
+ * pelos valores (inclusive em graus/minutos/segundos com hemisfério).
+ */
 export function suggestColumns(sheet: Sheet, types: ImportType[]) {
-  const pick = (patterns: RegExp[]) => {
+  const isCoordCol = (i: number) => share(sheet, i, (v) => parseCoordValue(v) !== null) >= 0.8;
+  const pick = (patterns: RegExp[], not = -1) => {
     for (const p of patterns) {
-      const i = sheet.headers.findIndex((h) => p.test(h.trim()));
+      const i = sheet.headers.findIndex((h, c) => c !== not && p.test(h.trim()) && isCoordCol(c));
       if (i >= 0) return i;
     }
     return -1;
   };
   let x = pick(X_NAMES);
-  let y = pick(Y_NAMES);
-  const sample = (c: number) =>
-    sheet.rows
-      .slice(0, 200)
-      .map((r) => toNumber(r[c]))
-      .filter((n): n is number => n !== null);
+  let y = pick(Y_NAMES, x);
   const inRange = (c: number, min: number, max: number) => {
-    const s = sample(c);
+    const s = coordSample(sheet, c);
     return s.length > 0 && s.every((n) => n >= min && n <= max);
   };
+  // Graus/minutos/segundos com hemisfério: N/S = latitude; E/W/L/O = longitude.
+  if (x < 0 || y < 0) {
+    const angular = sheet.headers
+      .map((_, i) => i)
+      .filter((i) => i !== x && i !== y && share(sheet, i, looksAngular) >= 0.8 && isCoordCol(i));
+    const hemi = (i: number, re: RegExp) =>
+      share(sheet, i, (v) => re.test(String(v).trim())) >= 0.8;
+    if (y < 0) y = angular.find((i) => i !== x && hemi(i, /(^[NS]|[NS]$|sul$|norte$)/i)) ?? -1;
+    if (x < 0)
+      x = angular.find((i) => i !== y && hemi(i, /(^[EWLO]|[EWLO]$|oeste$|leste$)/i)) ?? -1;
+  }
   // Sem nomes reconhecidos: UTM (leste ~100 mil–900 mil; norte ~1–10 milhões).
   if (x < 0 || y < 0) {
-    const numeric = types.map((t, i) => (t !== 'text' ? i : -1)).filter((i) => i >= 0);
+    const numeric = types
+      .map((t, i) => (t !== 'text' || isCoordCol(i) ? i : -1))
+      .filter((i) => i >= 0);
     if (x < 0) x = numeric.find((i) => i !== y && inRange(i, 100_000, 999_999)) ?? -1;
     if (y < 0) y = numeric.find((i) => i !== x && inRange(i, 1_000_000, 10_000_000)) ?? -1;
   }
-  const geographic = x >= 0 && y >= 0 && inRange(x, -180, 180) && inRange(y, -90, 90);
-  const id = pick(ID_NAMES);
+
+  // Uma coluna com as duas coordenadas (quando não há X e Y separados).
+  let pair = -1;
+  if (x < 0 || y < 0) {
+    const isPair = (i: number) => share(sheet, i, (v) => splitCoordPair(v) !== null) >= 0.8;
+    const order = sheet.headers
+      .map((_, i) => i)
+      .sort(
+        (a, b) =>
+          Number(PAIR_NAMES.test(sheet.headers[b])) - Number(PAIR_NAMES.test(sheet.headers[a])),
+      );
+    pair = order.find((i) => types[i] === 'text' && isPair(i)) ?? -1;
+  }
+
+  let geographic: boolean;
+  if (pair >= 0) {
+    geographic =
+      share(sheet, pair, (v) => {
+        const p = splitCoordPair(v);
+        return !!p && pairLooksGeographic(p);
+      }) >= 0.8;
+    x = -1;
+    y = -1;
+  } else {
+    geographic = x >= 0 && y >= 0 && inRange(x, -180, 180) && inRange(y, -90, 90);
+    // Latitude e longitude trocadas (a coluna "X" só tem valores até 90 e a "Y" passa disso).
+    if (x >= 0 && y >= 0 && !geographic && inRange(y, -180, 180) && inRange(x, -90, 90)) {
+      [x, y] = [y, x];
+      geographic = true;
+    }
+  }
+  const idIndex = ID_NAMES.reduce(
+    (found, p) => (found >= 0 ? found : sheet.headers.findIndex((h) => p.test(h.trim()))),
+    -1,
+  );
   return {
-    idColumn: id >= 0 ? sheet.headers[id] : null,
+    idColumn: idIndex >= 0 ? sheet.headers[idIndex] : null,
     xColumn: x >= 0 ? sheet.headers[x] : null,
     yColumn: y >= 0 ? sheet.headers[y] : null,
+    coordColumn: pair >= 0 ? sheet.headers[pair] : null,
     coordinates: geographic
       ? ('geographic' as const)
-      : x >= 0 && y >= 0
+      : (x >= 0 && y >= 0) || pair >= 0
         ? ('projected' as const)
         : null,
   };
+}
+
+/**
+ * Coordenadas de cada linha no sistema da camada (X = leste/longitude, Y = norte/latitude), lidas de
+ * duas colunas ou de uma coluna com o par. Aceita vírgula/ponto decimal e graus/minutos/segundos.
+ */
+export function readCoordinates(
+  sheet: Sheet,
+  cfg: { xColumn?: string | null; yColumn?: string | null; coordColumn?: string | null },
+  geographic: boolean,
+): ({ x: number; y: number } | null)[] {
+  if (cfg.coordColumn) {
+    const c = sheet.headers.indexOf(cfg.coordColumn);
+    return sheet.rows.map((r) => {
+      const p = splitCoordPair(typeof r[c] === 'string' ? r[c] : null);
+      return p ? pairToXY(p, geographic) : null;
+    });
+  }
+  const xi = sheet.headers.indexOf(cfg.xColumn ?? '');
+  const yi = sheet.headers.indexOf(cfg.yColumn ?? '');
+  return sheet.rows.map((r) => {
+    const x = parseCoordValue(r[xi]);
+    const y = parseCoordValue(r[yi]);
+    return x === null || y === null ? null : { x, y };
+  });
 }
 
 /** Nome de tabela seguro a partir do nome da camada (minúsculas, sem acentos, até 50 caracteres). */

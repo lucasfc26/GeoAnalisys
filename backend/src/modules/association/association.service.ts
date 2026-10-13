@@ -10,6 +10,8 @@ import {
   selectExpr,
 } from '../../common/sql';
 import { PrismaService } from '../../prisma/prisma.service';
+import type { ImportType } from '../layers/import.parse';
+import { LayersService } from '../layers/layers.service';
 import { SourceContext, SourcesService } from '../tables/sources.service';
 import { AssocPoint, aggregateKinds, associate, normalizeValue } from './association.logic';
 
@@ -67,7 +69,11 @@ interface LoadedPoint extends AssocPoint {
 
 export interface AssociationTable {
   headers: string[];
+  /** Tipo de cada coluna, para gravar o resultado como camada */
+  types: ImportType[];
   rows: unknown[][];
+  /** Posição de cada linha: a do ponto de A ou, sem ele, a do ponto de B */
+  coords: ({ lat: number; lng: number } | null)[];
   summary: {
     nameA: string;
     nameB: string;
@@ -121,7 +127,9 @@ interface PairInfo {
 
 /** "a", "a e b", "a, b e c" */
 export function joinPt(items: string[]) {
-  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} e ${items[items.length - 1]}`;
+  return items.length < 2
+    ? items.join('')
+    : `${items.slice(0, -1).join(', ')} e ${items[items.length - 1]}`;
 }
 
 interface StatusAttr {
@@ -216,6 +224,7 @@ export function describeStatusRule(rule: StatusRule | undefined, nameA: string, 
 export interface OutputField {
   key: string;
   header: string;
+  type: ImportType;
   /** Coluna de atributo a ler da camada (null = campo da associação) */
   attr: { side: 'A' | 'B'; column: ColumnMeta | typeof LAT | typeof LNG } | null;
   value: (p: LoadedPoint | null, q: LoadedPoint | null, pair: PairInfo | null) => unknown;
@@ -224,7 +233,12 @@ export interface OutputField {
 interface LayerInfo {
   name: string;
   colMap: Map<string, ColumnMeta>;
+  /** Tipo da coluna de ID (padrão: texto) */
+  idKind?: ColumnMeta['kind'];
 }
+
+const typeOfKind = (kind: ColumnMeta['kind'] | undefined): ImportType =>
+  kind === 'integer' ? 'integer' : kind === 'number' ? 'number' : 'text';
 
 /** Chaves padrão: IDs, distância, prioridades atendidas, pontuação, status e uma coluna por prioridade. */
 export function defaultColumns(critLabels: string[]) {
@@ -254,12 +268,29 @@ export function outputFields(
   if (!keys.length) throw new BadRequestException('Escolha ao menos uma coluna');
   const attrIndex = { A: 0, B: 0 };
   return keys.map((key): OutputField => {
-    if (key === KEY_ID_A) return { key, header: `ID ${a.name}`, attr: null, value: (p) => (p ? p.id : 0) };
-    if (key === KEY_ID_B) return { key, header: `ID ${b.name}`, attr: null, value: (_, q) => (q ? q.id : 0) };
+    if (key === KEY_ID_A) {
+      return {
+        key,
+        header: `ID ${a.name}`,
+        type: typeOfKind(a.idKind),
+        attr: null,
+        value: (p) => (p ? p.id : 0),
+      };
+    }
+    if (key === KEY_ID_B) {
+      return {
+        key,
+        header: `ID ${b.name}`,
+        type: typeOfKind(b.idKind),
+        attr: null,
+        value: (_, q) => (q ? q.id : 0),
+      };
+    }
     if (key === KEY_DISTANCE) {
       return {
         key,
         header: 'Distância (m)',
+        type: 'number',
         attr: null,
         value: (_p, _q, pair) => (pair ? Math.round(pair.distance * 100) / 100 : null),
       };
@@ -268,6 +299,7 @@ export function outputFields(
       return {
         key,
         header: 'Prioridades atendidas',
+        type: 'integer',
         attr: null,
         value: (_p, _q, pair) => (pair ? pair.met.filter(Boolean).length : null),
       };
@@ -276,6 +308,7 @@ export function outputFields(
       return {
         key,
         header: 'Pontuação',
+        type: 'number',
         attr: null,
         value: (_p, _q, pair) => (pair ? pair.score : null),
       };
@@ -284,6 +317,7 @@ export function outputFields(
       return {
         key,
         header: 'Status',
+        type: 'text',
         attr: null,
         value: (p, q, pair) => status(p, q, pair),
       };
@@ -294,6 +328,7 @@ export function outputFields(
       return {
         key,
         header: `Prioridade: ${critLabels[k]}`,
+        type: 'text',
         attr: null,
         value: (_p, _q, pair) => (pair ? (pair.met[k] ? 'Sim' : 'Não') : null),
       };
@@ -311,6 +346,7 @@ export function outputFields(
     return {
       key,
       header: `${label} ${layer.name}`,
+      type: typeof column === 'string' ? 'number' : typeOfKind(column.kind),
       attr: { side, column },
       value: side === 'A' ? (p) => pick(p) : (_, q) => pick(q),
     };
@@ -319,6 +355,11 @@ export function outputFields(
 
 const PREVIEW_ROWS = 200;
 
+/** Onde gravar o resultado: nova camada em GeoAnalisysTemp ou substituir uma de lá. */
+export type AssociationLayerTarget = { convertCoordinates?: boolean } & (
+  { mode: 'create'; name: string } | { mode: 'replace'; sourceId: string; adjustColumns: boolean }
+);
+
 @Injectable()
 export class AssociationService {
   private readonly logger = new Logger(AssociationService.name);
@@ -326,12 +367,41 @@ export class AssociationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly sources: SourcesService,
+    private readonly layers: LayersService,
   ) {}
 
   /** Resumo e primeiras linhas do resultado. */
   async preview(req: AssociationRequest) {
     const t = await this.run(req);
-    return { ...t, rows: t.rows.slice(0, PREVIEW_ROWS), totalRows: t.rows.length };
+    return {
+      headers: t.headers,
+      summary: t.summary,
+      rows: t.rows.slice(0, PREVIEW_ROWS),
+      totalRows: t.rows.length,
+    };
+  }
+
+  /** Resultado completo gravado como camada temporária (nova ou substituindo uma existente). */
+  async toLayer(req: AssociationRequest, target: AssociationLayerTarget, userId: string) {
+    if (target.mode === 'replace' && [req.a.sourceId, req.b.sourceId].includes(target.sourceId)) {
+      throw new BadRequestException('A camada substituída não pode ser a camada A nem a B');
+    }
+    const t = await this.run(req);
+    if (target.mode === 'create') {
+      return this.layers.createFromTable(t, target.name, userId, {
+        categoryHeader: 'Status',
+        convertCoordinates: target.convertCoordinates,
+      });
+    }
+    const replaced = await this.layers.replaceFromTable(
+      t,
+      target.sourceId,
+      target.adjustColumns,
+      userId,
+    );
+    if (!target.convertCoordinates) return replaced;
+    const conv = await this.layers.convertCoordinates(target.sourceId, userId);
+    return { ...replaced, source: conv.source };
   }
 
   async download(req: AssociationRequest, format: 'xlsx' | 'csv', res: Response) {
@@ -364,15 +434,23 @@ export class AssociationService {
       return;
     }
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
     const wb = new ExcelJS.Workbook();
     wb.creator = 'GeoAnalisys';
     wb.created = new Date();
     const sheet = wb.addWorksheet('Associação', { views: [{ state: 'frozen', ySplit: 1 }] });
-    sheet.columns = t.headers.map((h) => ({ header: h, width: Math.min(Math.max(h.length + 2, 14), 40) }));
+    sheet.columns = t.headers.map((h) => ({
+      header: h,
+      width: Math.min(Math.max(h.length + 2, 14), 40),
+    }));
     sheet.getRow(1).font = { bold: true };
     sheet.addRows(
-      t.rows.map((r) => r.map((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : v))),
+      t.rows.map((r) =>
+        r.map((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : v)),
+      ),
     );
 
     const s = t.summary;
@@ -458,7 +536,10 @@ export class AssociationService {
       const i = statusCols[side].indexOf(col);
       return i >= 0 ? i : statusCols[side].push(col) - 1;
     };
-    const statusRules = [...req.criteria.map((c) => c.status), ...(req.aggregates ? [req.aggregates.status] : [])];
+    const statusRules = [
+      ...req.criteria.map((c) => c.status),
+      ...(req.aggregates ? [req.aggregates.status] : []),
+    ];
     const statusAttr = (s: StatusRule | undefined): StatusAttr | null =>
       s?.attribute
         ? {
@@ -487,8 +568,8 @@ export class AssociationService {
     };
     const statusOf = statusResolver(nameA, plan);
     const fields = outputFields(
-      { name: nameA, colMap: ctxA.colMap },
-      { name: nameB, colMap: ctxB.colMap },
+      { name: nameA, colMap: ctxA.colMap, idKind: ctxA.idCol.kind },
+      { name: nameB, colMap: ctxB.colMap, idKind: ctxB.idCol.kind },
       plan.labels,
       req.columns,
       statusOf,
@@ -537,6 +618,9 @@ export class AssociationService {
       if (pair && status === 'Ponto Normal') normal++;
       return fields.map((f) => f.value(p, q, pair) ?? null);
     };
+    const position = (pt: LoadedPoint) =>
+      pt.lat !== null && pt.lng !== null ? { lat: pt.lat, lng: pt.lng } : null;
+    const coords = a.map(position);
     const rows: unknown[][] = a.map((p, i) => {
       const j = r.matchA[i];
       if (j < 0) return row(p, null, null);
@@ -552,10 +636,14 @@ export class AssociationService {
       if (r.matchB[j] >= 0) return;
       unmatchedB++;
       const line = row(null, q, null);
-      if (req.includeUnmatchedB) rows.push(line);
+      if (req.includeUnmatchedB) {
+        rows.push(line);
+        coords.push(position(q));
+      }
     });
 
-    const noCoords = (pts: LoadedPoint[]) => pts.filter((p) => p.lat === null || p.lng === null).length;
+    const noCoords = (pts: LoadedPoint[]) =>
+      pts.filter((p) => p.lat === null || p.lng === null).length;
     const summary = {
       nameA,
       nameB,
@@ -576,13 +664,20 @@ export class AssociationService {
       durationMs: Date.now() - started,
     };
     this.logger.log({ event: 'association', a: req.a.sourceId, b: req.b.sourceId, ...summary });
-    return { headers: fields.map((f) => f.header), rows, summary };
+    return {
+      headers: fields.map((f) => f.header),
+      types: fields.map((f) => f.type),
+      rows,
+      coords,
+      summary,
+    };
   }
 
   private column(ctx: SourceContext, name: string) {
     const c = ctx.colMap.get(name);
     if (!c) throw new BadRequestException(`Coluna "${name}" não existe em ${ctx.source.name}`);
-    if (c.kind === 'geometry') throw new BadRequestException(`Coluna geométrica não suportada: ${name}`);
+    if (c.kind === 'geometry')
+      throw new BadRequestException(`Coluna geométrica não suportada: ${name}`);
     return c;
   }
 

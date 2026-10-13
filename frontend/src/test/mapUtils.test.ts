@@ -15,6 +15,15 @@ describe('Tabela de Alterações (formatação)', () => {
     expect(changeObservation('CREATE', 'Ponto Novo')).toBe('Adicionado: Ponto Novo');
     expect(changeObservation('DELETE', 'Duplicidade')).toBe('Removido: Duplicidade');
     expect(changeObservation('UPDATE', null)).toBe('Ponto Alterado');
+    expect(changeObservation('UPDATE', 'conferido', ['medicao'])).toBe('Ponto Alterado: conferido');
+  });
+
+  it('adicionado e alterado depois; prefixo não se repete', () => {
+    expect(changeObservation('CREATE', 'Ponto Novo', ['potencia'])).toBe(
+      'Adicionado: Ponto Novo e Alterado',
+    );
+    expect(changeObservation('CREATE', null, ['potencia'])).toBe('Adicionado e Alterado');
+    expect(changeObservation('DELETE', 'Removido: Duplicidade')).toBe('Removido: Duplicidade');
   });
 });
 

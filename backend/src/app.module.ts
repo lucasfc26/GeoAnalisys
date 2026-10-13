@@ -12,6 +12,7 @@ import { AnalysisModule } from './modules/analysis/analysis.module';
 import { ComparisonModule } from './modules/comparison/comparison.module';
 import { AssociationModule } from './modules/association/association.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { ChangeActionsModule } from './modules/changes/change-actions.module';
 import { ChangesModule } from './modules/changes/changes.module';
 import { DuplicatesModule } from './modules/duplicates/duplicates.module';
 import { ExportModule } from './modules/export/export.module';
@@ -41,6 +42,7 @@ const staticModules: DynamicModule[] = existsSync(join(FRONTEND_DIST, 'index.htm
     MapsModule,
     TablesModule,
     PointsModule,
+    ChangeActionsModule,
     ExportModule,
     AssociationModule,
     DuplicatesModule,

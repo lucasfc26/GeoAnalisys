@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { FileText, Loader2, MapPinOff, MousePointerClick, Upload } from 'lucide-react';
+import { FileText, List, Loader2, MapPinOff, MousePointerClick, Upload } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { BOUNDARY_ACCEPT, useImportBoundaries } from '@/hooks/useImportBoundaries';
 import { useSources } from '@/hooks/useSourceData';
@@ -9,6 +9,7 @@ import { csvBlob, selectPoints } from '@/lib/selectPoints';
 import { analysisService, type OutsideRequest, type OutsideResult } from '@/services/analysis';
 import { triggerDownload } from '@/services/export';
 import { useAppStore } from '@/stores/appStore';
+import { useToolListsStore } from '@/stores/toolListsStore';
 import type { FilterDef } from '@/types';
 import { fmtInt } from '@/utils/format';
 import { fmtDistance } from '@/utils/geo';
@@ -113,12 +114,16 @@ export default function OutsideBoundaryDialog() {
         }
       : null;
 
+  // Último resultado (continua ao reabrir pelos Parâmetros da lista).
   const [result, setResult] = useState<{ request: OutsideRequest; data: OutsideResult } | null>(
-    null,
+    () => useToolListsStore.getState().outside,
   );
   const run = useMutation({
     mutationFn: (req: OutsideRequest) => analysisService.outside(req),
-    onSuccess: (data, req) => setResult({ request: req, data }),
+    onSuccess: (data, req) => {
+      setResult({ request: req, data });
+      useToolListsStore.getState().setOutside({ request: req, data });
+    },
     onError: (err) => toast.error(errorMessage(err)),
   });
   const close = () => closeDialog('outsideBoundary');
@@ -129,6 +134,15 @@ export default function OutsideBoundaryDialog() {
     if (boundary && !boundary.visible) updateBoundary(boundary.id, { visible: true });
     selectPoints(result.request.layer.sourceId, result.data.points);
     toast.success(`${fmtInt(result.data.points.length)} ponto(s) fora do limite selecionado(s).`);
+    close();
+  };
+  /** Lista dos pontos sobre o mapa (selecionar um por um, excluir). */
+  const listPoints = () => {
+    if (!result) return;
+    if (boundary && !boundary.visible) updateBoundary(boundary.id, { visible: true });
+    const st = useToolListsStore.getState();
+    st.setOutside(result);
+    st.setOutsideOpen(true);
     close();
   };
   const downloadCsv = () => {
@@ -344,6 +358,14 @@ export default function OutsideBoundaryDialog() {
                   <Button
                     size="sm"
                     variant="primary"
+                    icon={<List className="size-3.5" />}
+                    onClick={listPoints}
+                    title="Lista sobre o mapa: clique em cada ponto para vê-lo e, se for o caso, excluí-lo"
+                  >
+                    Listar pontos
+                  </Button>
+                  <Button
+                    size="sm"
                     icon={<MousePointerClick className="size-3.5" />}
                     onClick={select}
                   >

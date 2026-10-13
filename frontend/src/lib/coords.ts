@@ -4,6 +4,8 @@
  *   -3.5073866,-38.9065257 · -3,5073866; -38,9065257 · 510376,5  9612212,7 · 510376.5 9612212.7
  */
 
+import proj4 from 'proj4';
+
 export type ParsedCoord =
   | { kind: 'latlng'; lat: number; lng: number }
   | { kind: 'projected'; x: number; y: number };
@@ -49,4 +51,69 @@ export function parseCoordinate(text: string): ParsedCoord | null {
   if (isNorthing(a) && isEasting(b)) return { kind: 'projected', x: b, y: a };
   if (Math.abs(a) > 180 || Math.abs(b) > 180) return { kind: 'projected', x: a, y: b };
   return null;
+}
+
+// ------------------------------------------------------------------ UTM
+
+export interface Utm {
+  x: number;
+  y: number;
+  /** Ex.: "24S" */
+  zone: string;
+}
+
+const utmConverters = new Map<string, proj4.Converter>();
+
+/**
+ * UTM de um ponto lat/lng (zona pela longitude; SIRGAS 2000 = GRS80, igual ao WGS 84 na prática).
+ * Mesma regra do backend (common/coords.ts).
+ */
+export function latLngToUtm(
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+): Utm | null {
+  if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 84 || Math.abs(lng) > 180) return null;
+  const zone = Math.min(60, Math.max(1, Math.floor((lng + 180) / 6) + 1));
+  const south = lat < 0;
+  const key = `${zone}${south ? 'S' : 'N'}`;
+  let conv = utmConverters.get(key);
+  if (!conv) {
+    conv = proj4(
+      '+proj=longlat +datum=WGS84 +no_defs',
+      `+proj=utm +zone=${zone}${south ? ' +south' : ''} +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs`,
+    );
+    utmConverters.set(key, conv);
+  }
+  const [x, y] = conv.forward([lng, lat]);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y, zone: key } : null;
+}
+
+/**
+ * Coordenadas para exibir no ponto: UTM X/Y (da própria tabela, se a camada é UTM; senão
+ * calculadas pela latitude/longitude) e latitude/longitude.
+ */
+export function displayCoords(
+  p: { x: number | null; y: number | null; lat: number | null; lng: number | null },
+  crs: { kind: string; zone?: number; hemisphere?: 'N' | 'S' } | undefined,
+) {
+  if (crs?.kind === 'utm') {
+    return {
+      utmX: p.x,
+      utmY: p.y,
+      zone: crs.zone ? `${crs.zone}${crs.hemisphere ?? ''}` : null,
+      computed: false,
+      lat: p.lat,
+      lng: p.lng,
+    };
+  }
+  const u = latLngToUtm(p.lat, p.lng);
+  return {
+    utmX: u?.x ?? null,
+    utmY: u?.y ?? null,
+    zone: u?.zone ?? null,
+    computed: true,
+    lat: p.lat,
+    lng: p.lng,
+  };
 }

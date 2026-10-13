@@ -1,5 +1,5 @@
 import { api, rawRequest } from '@/lib/api';
-import type { FilterDef } from '@/types';
+import type { DataSource, FilterDef } from '@/types';
 import { filenameFrom, triggerDownload } from './export';
 
 /** Como a divergência de uma prioridade aparece na coluna Status */
@@ -58,8 +58,34 @@ export interface AssociationPreview {
   };
 }
 
+/** Onde gravar o resultado: nova camada em GeoAnalisysTemp ou substituir uma de lá */
+export type AssociationLayerTarget = {
+  /** Grava também UTM X/Y e zona (camada nova) ou as coordenadas convertidas (substituição) */
+  convertCoordinates?: boolean;
+} & (
+  { mode: 'create'; name: string } | { mode: 'replace'; sourceId: string; adjustColumns: boolean }
+);
+
+export interface AssociationLayerResult {
+  source: DataSource;
+  rows: number;
+  schema: string;
+  tableName: string;
+  /** Valores que não couberam no tipo da coluna (ficaram vazios), por coluna */
+  invalid: Record<string, number>;
+  /** Substituir com ajuste: colunas acrescentadas e apagadas */
+  added: string[];
+  removed: string[];
+  /** Colunas do resultado que não foram gravadas (não existem na tabela) */
+  ignored: string[];
+  /** Substituir sem ajuste: colunas da tabela que ficaram vazias */
+  empty: string[];
+}
+
 export const associationService = {
   preview: (req: AssociationRequest) => api.post<AssociationPreview>('/association/preview', req),
+  toLayer: (req: AssociationRequest, target: AssociationLayerTarget) =>
+    api.post<AssociationLayerResult>('/association/layer', { ...req, target }),
   async download(req: AssociationRequest, format: 'xlsx' | 'csv') {
     const res = await rawRequest(`/association/${format}`, {
       method: 'POST',

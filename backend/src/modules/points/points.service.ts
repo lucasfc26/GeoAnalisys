@@ -8,6 +8,7 @@ import { FilterDef, buildFilterConditions } from '../../common/filters';
 import { LatLng, LatLngBounds, coordKey, inBounds } from '../../common/geo';
 import { labelSql } from '../../common/label-expr';
 import { MAX_IDS } from './dto/points.dto';
+import { coerceFor } from './copy.logic';
 import {
   ColumnMeta,
   Params,
@@ -825,12 +826,100 @@ export class PointsService {
     return { assignments, newX, newY };
   }
 
+  /**
+   * Insere um registro (dentro da transação de escrita): ID automático quando não informado,
+   * geometria sincronizada com X/Y e auditoria. A Tabela de Alterações fica com quem chama.
+   */
+  private async insertRecord(
+    tx: Prisma.TransactionClient,
+    ctx: SourceContext,
+    data: Record<string, unknown>,
+    userId: string,
+  ): Promise<PointRecord> {
+    const params = new Params();
+    const { assignments, newX, newY } = this.buildAssignments(ctx, params, data, {
+      forInsert: true,
+    });
+    this.validateCoords(ctx, newX!, newY!);
+
+    // ID não informado: numérico continua a partir do maior da camada (max+1), mesmo com valor
+    // automático; senão, o valor automático da coluna.
+    const hasId = assignments.some((a) => a.col === ctx.idCol.name);
+    const numericId =
+      (ctx.idCol.kind === 'integer' || ctx.idCol.kind === 'number') && !ctx.idCol.isGenerated;
+    const generateId = !hasId && numericId;
+    if (!hasId && !numericId && !ctx.idCol.hasDefault) {
+      throw new BadRequestException(`Informe o valor de "${ctx.idCol.name}"`);
+    }
+    if (generateId) {
+      await tx.$executeRawUnsafe(
+        `SELECT pg_advisory_xact_lock(hashtext($1))`,
+        this.entity(ctx),
+      );
+      const [{ next }] = await tx.$queryRawUnsafe<{ next: string }[]>(
+        `SELECT (COALESCE(max(${qi(ctx.idCol.name)}), 0) + 1)::text AS next FROM ${ctx.table}`,
+      );
+      assignments.push({
+        col: ctx.idCol.name,
+        expr: `CAST(${params.add(next)} AS ${castType(ctx.idCol)})`,
+      });
+    }
+    if (ctx.geomCol)
+      assignments.push({
+        col: ctx.geomCol.name,
+        expr: this.geomExpr(ctx, params, newX!, newY!),
+      });
+
+    const [row] = await tx.$queryRawUnsafe<{ id: string }[]>(
+      `INSERT INTO ${ctx.table} (${assignments.map((a) => qi(a.col)).join(', ')}) ${generateId && ctx.idCol.isIdentity ? 'OVERRIDING SYSTEM VALUE' : ''}
+       VALUES (${assignments.map((a) => a.expr).join(', ')})
+       RETURNING ${qi(ctx.idCol.name)}::text AS id`,
+      ...params.values,
+    );
+    if ((generateId || hasId) && numericId && ctx.idCol.hasDefault) {
+      await this.syncIdSequence(tx, ctx);
+    }
+    const created = await this.findOne(ctx.source.id, row.id, tx);
+    await this.audit.log(
+      {
+        userId,
+        action: 'CREATE',
+        entity: this.entity(ctx),
+        entityId: created.id,
+        sourceId: ctx.source.id,
+        newValue: created.data,
+      },
+      tx,
+    );
+    return created;
+  }
+
   private validateCoords(ctx: SourceContext, x: number, y: number) {
     if (!ctx.crs.isValid(x, y) || !ctx.crs.toLatLng(x, y)) {
       throw new BadRequestException(
         `Coordenada (${x}, ${y}) inválida para ${ctx.crs.def.name}. Verifique zona/hemisfério.`,
       );
     }
+  }
+
+  /**
+   * Após gravar IDs explícitos numa coluna com sequência (serial/identity), avança a sequência até o
+   * maior ID, para o próximo valor automático não repetir um existente. Sem sequência própria ou sem
+   * permissão nela, não faz nada.
+   */
+  private async syncIdSequence(tx: Prisma.TransactionClient, ctx: SourceContext) {
+    const id = qi(ctx.idCol.name);
+    await tx.$queryRawUnsafe(
+      `SELECT setval(s.seq::regclass, m.mx)
+         FROM (SELECT pg_get_serial_sequence($1, $2) AS seq) s,
+              (SELECT ceil(max(${id}))::bigint AS mx FROM ${ctx.table}) m
+        WHERE s.seq IS NOT NULL AND m.mx IS NOT NULL
+          AND has_sequence_privilege(s.seq, 'UPDATE')
+          AND m.mx > COALESCE((SELECT p.last_value FROM pg_sequences p
+                                WHERE format('%I.%I', p.schemaname, p.sequencename) = s.seq), 0)`,
+      ctx.table,
+      ctx.idCol.name,
+    );
   }
 
   private geomExpr(ctx: SourceContext, params: Params, x: number, y: number) {
@@ -881,54 +970,7 @@ export class PointsService {
     return this.prisma.$transaction(
       async (tx) => {
         await this.writePath(ctx, tx);
-        const params = new Params();
-        const { assignments, newX, newY } = this.buildAssignments(ctx, params, data, {
-          forInsert: true,
-        });
-        this.validateCoords(ctx, newX!, newY!);
-
-        // ID sem valor e sem default: gera max+1 (tabelas sem chave primária/serial).
-        const hasId = assignments.some((a) => a.col === ctx.idCol.name);
-        if (!hasId && !ctx.idCol.hasDefault) {
-          if (ctx.idCol.kind !== 'integer' && ctx.idCol.kind !== 'number') {
-            throw new BadRequestException(`Informe o valor de "${ctx.idCol.name}"`);
-          }
-          await tx.$executeRawUnsafe(
-            `SELECT pg_advisory_xact_lock(hashtext($1))`,
-            this.entity(ctx),
-          );
-          const [{ next }] = await tx.$queryRawUnsafe<{ next: string }[]>(
-            `SELECT (COALESCE(max(${qi(ctx.idCol.name)}), 0) + 1)::text AS next FROM ${ctx.table}`,
-          );
-          assignments.push({
-            col: ctx.idCol.name,
-            expr: `CAST(${params.add(next)} AS ${castType(ctx.idCol)})`,
-          });
-        }
-        if (ctx.geomCol)
-          assignments.push({
-            col: ctx.geomCol.name,
-            expr: this.geomExpr(ctx, params, newX!, newY!),
-          });
-
-        const [row] = await tx.$queryRawUnsafe<{ id: string }[]>(
-          `INSERT INTO ${ctx.table} (${assignments.map((a) => qi(a.col)).join(', ')})
-           VALUES (${assignments.map((a) => a.expr).join(', ')})
-           RETURNING ${qi(ctx.idCol.name)}::text AS id`,
-          ...params.values,
-        );
-        const created = await this.findOne(dto.sourceId, row.id, tx);
-        await this.audit.log(
-          {
-            userId,
-            action: 'CREATE',
-            entity: this.entity(ctx),
-            entityId: created.id,
-            sourceId: dto.sourceId,
-            newValue: created.data,
-          },
-          tx,
-        );
+        const created = await this.insertRecord(tx, ctx, data, userId);
         await this.changes.logCreate(tx, ctx, [created.id], dto.observation);
         return created;
       },
@@ -985,7 +1027,14 @@ export class PointsService {
     );
   }
 
-  async remove(sourceId: string, id: string, userId: string, observation?: string) {
+  /** `forgetChange`: desfaz a inclusão do ponto (some da Tabela de Alterações em vez de virar DELETE). */
+  async remove(
+    sourceId: string,
+    id: string,
+    userId: string,
+    observation?: string,
+    opts: { forgetChange?: boolean } = {},
+  ) {
     const ctx = await this.sources.context(sourceId);
     return this.prisma.$transaction(
       async (tx) => {
@@ -1007,8 +1056,102 @@ export class PointsService {
           },
           tx,
         );
-        await this.changes.logDelete(tx, ctx, [id], observation);
+        if (opts.forgetChange) await this.changes.forget(tx, ctx, [id]);
+        else await this.changes.logDelete(tx, ctx, [{ id, data: before.data }], observation);
         return { deleted };
+      },
+      { timeout: 30_000 },
+    );
+  }
+
+  /**
+   * Recria um registro removido com os atributos guardados na Tabela de Alterações (ou, em remoções
+   * antigas sem eles, no histórico) e tira a remoção da tabela.
+   */
+  async restoreDeleted(sourceId: string, id: string, userId: string) {
+    const ctx = await this.sources.context(sourceId);
+    if (ctx.idCol.isGenerated) {
+      throw new BadRequestException(`A coluna "${ctx.idCol.name}" é calculada; não dá para restaurar`);
+    }
+    let data = await this.changes.removedSnapshot(ctx, id);
+    if (!Object.keys(data).length) {
+      const entry = await this.prisma.auditLog.findFirst({
+        where: {
+          sourceId,
+          entity: this.entity(ctx),
+          entityId: id,
+          action: { in: ['DELETE', 'BULK_DELETE'] },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      const old = entry?.oldValue;
+      if (!old || typeof old !== 'object' || Array.isArray(old)) {
+        throw new BadRequestException(`Os dados do registro ${id} removido não foram guardados`);
+      }
+      data = old as Record<string, unknown>;
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        await this.writePath(ctx, tx);
+        const check = new Params();
+        const exists = await tx.$queryRawUnsafe<unknown[]>(
+          `SELECT 1 FROM ${ctx.table} WHERE ${this.idEquals(ctx, check, id)} LIMIT 1`,
+          ...check.values,
+        );
+        if (exists.length) throw new BadRequestException(`O registro ${id} já existe na camada`);
+
+        const params = new Params();
+        const assignments = ctx.columns
+          .filter(
+            (c) =>
+              c !== ctx.idCol &&
+              c.kind !== 'geometry' &&
+              !c.isGenerated &&
+              !c.readOnly &&
+              Object.prototype.hasOwnProperty.call(data, c.name),
+          )
+          .map((c) => {
+            const p = toParam(data[c.name]);
+            return {
+              col: c.name,
+              expr: p === null ? 'NULL' : `CAST(${params.add(p)} AS ${castType(c)})`,
+            };
+          });
+        assignments.push({
+          col: ctx.idCol.name,
+          expr: `CAST(${params.add(id)} AS ${castType(ctx.idCol)})`,
+        });
+        const x = Number(data[ctx.xCol.name]);
+        const y = Number(data[ctx.yCol.name]);
+        if (ctx.geomCol && data[ctx.xCol.name] != null && data[ctx.yCol.name] != null) {
+          if (Number.isFinite(x) && Number.isFinite(y)) {
+            assignments.push({ col: ctx.geomCol.name, expr: this.geomExpr(ctx, params, x, y) });
+          }
+        }
+
+        await tx.$executeRawUnsafe(
+          `INSERT INTO ${ctx.table} (${assignments.map((a) => qi(a.col)).join(', ')}) ${ctx.idCol.isIdentity ? 'OVERRIDING SYSTEM VALUE' : ''}
+           VALUES (${assignments.map((a) => a.expr).join(', ')})`,
+          ...params.values,
+        );
+        if ((ctx.idCol.kind === 'integer' || ctx.idCol.kind === 'number') && ctx.idCol.hasDefault) {
+          await this.syncIdSequence(tx, ctx);
+        }
+        const restored = await this.findOne(sourceId, id, tx);
+        await this.audit.log(
+          {
+            userId,
+            action: 'RESTORE',
+            entity: this.entity(ctx),
+            entityId: id,
+            sourceId,
+            newValue: restored.data,
+          },
+          tx,
+        );
+        await this.changes.forget(tx, ctx, [id]);
+        return restored;
       },
       { timeout: 30_000 },
     );
@@ -1104,6 +1247,107 @@ export class PointsService {
    * Move (ou duplica) registros aplicando o mesmo deslocamento X/Y, no CRS da fonte, calculado a partir
    * do arraste no mapa (from -> to). Retorna os registros afetados (ou as cópias) já na nova posição.
    */
+  /**
+   * Duplica registros em outra camada, na mesma posição (convertida para o sistema de coordenadas
+   * dela). `mapping` liga coluna de origem → coluna de destino; colunas de origem sem destino (ou
+   * ausentes) não são copiadas. Valores que não cabem no tipo do destino ficam vazios e são contados.
+   * Tudo numa transação; as cópias entram na Tabela de Alterações da camada de destino.
+   */
+  async copyToSource(
+    sourceId: string,
+    ids: string[],
+    targetId: string,
+    mapping: Record<string, string | null>,
+    userId: string,
+    observation?: string,
+  ) {
+    if (sourceId === targetId)
+      throw new BadRequestException('Para duplicar na mesma camada, use Duplicar na camada atual');
+    const src = await this.sources.context(sourceId);
+    const dst = await this.sources.context(targetId);
+    const coordCols = new Set(
+      [dst.xCol, dst.yCol, dst.geomCol].flatMap((c) => (c ? [c.name] : [])),
+    );
+    const pairs: { from: string; to: ColumnMeta }[] = [];
+    const used = new Set<string>();
+    for (const [from, to] of Object.entries(mapping ?? {})) {
+      if (!to) continue;
+      if (!src.colMap.has(from)) throw new BadRequestException(`Coluna "${from}" não existe na origem`);
+      const col = dst.colMap.get(to);
+      if (!col) throw new BadRequestException(`Coluna "${to}" não existe em ${dst.source.name}`);
+      if (col.readOnly || coordCols.has(to))
+        throw new BadRequestException(`A coluna "${to}" de ${dst.source.name} não recebe valores`);
+      if (used.has(to))
+        throw new BadRequestException(`A coluna "${to}" recebe mais de um atributo`);
+      used.add(to);
+      pairs.push({ from, to: col });
+    }
+
+    const records = await this.records(sourceId, ids, true);
+    if (!records.length) throw new BadRequestException('Nenhum dos registros foi encontrado');
+    const decimals = dst.crs.def.kind === 'geographic' ? 8 : 3;
+    const f = 10 ** decimals;
+    const invalid: Record<string, number> = {};
+    let skipped = 0;
+    const rows: Record<string, unknown>[] = [];
+    for (const r of records) {
+      const xy = r.lat !== null && r.lng !== null ? dst.crs.toXY(r.lat, r.lng) : null;
+      if (!xy || !dst.crs.isValid(xy.x, xy.y)) {
+        skipped++;
+        continue;
+      }
+      const data: Record<string, unknown> = {
+        [dst.xCol.name]: Math.round(xy.x * f) / f,
+        [dst.yCol.name]: Math.round(xy.y * f) / f,
+      };
+      for (const p of pairs) {
+        const c = coerceFor(p.to, r.data[p.from]);
+        if (c.invalid) invalid[p.to.name] = (invalid[p.to.name] ?? 0) + 1;
+        // ID vazio: o destino gera um (como em Adicionar ponto).
+        if (p.to === dst.idCol && c.value === null) continue;
+        data[p.to.name] = c.value;
+      }
+      rows.push(data);
+    }
+    if (!rows.length)
+      throw new BadRequestException(
+        `Nenhum registro tem posição válida no sistema de coordenadas de ${dst.source.name}`,
+      );
+
+    const created = await this.prisma.$transaction(
+      async (tx) => {
+        await this.writePath(dst, tx);
+        const out: PointRecord[] = [];
+        for (const data of rows) out.push(await this.insertRecord(tx, dst, data, userId));
+        await this.changes.logCreate(
+          tx,
+          dst,
+          out.map((c) => c.id),
+          observation,
+        );
+        return out;
+      },
+      { timeout: 300_000, maxWait: 10_000 },
+    );
+
+    const groups = new Map<string, { key: string; x: number; y: number; lat: number; lng: number; ids: string[] }>();
+    for (const c of created) {
+      if (c.x === null || c.y === null || c.lat === null || c.lng === null) continue;
+      const key = coordKey(c.x, c.y);
+      const g = groups.get(key);
+      if (g) g.ids.push(c.id);
+      else groups.set(key, { key, x: c.x, y: c.y, lat: c.lat, lng: c.lng, ids: [c.id] });
+    }
+    return {
+      count: created.length,
+      skipped,
+      invalid,
+      targetId,
+      targetName: dst.source.name,
+      groups: [...groups.values()],
+    };
+  }
+
   async translate(
     sourceId: string,
     ids: string[],
@@ -1233,7 +1477,9 @@ export class PointsService {
             })),
           );
         } else {
-          // Copia todas as colunas graváveis; X/Y (e a geometria) vêm deslocados e o ID é gerado.
+          // Copia todas as colunas graváveis; X/Y (e a geometria) vêm deslocados. ID numérico: continua
+          // a partir do maior da camada (max+1, max+2…, na ordem dos originais), mesmo com valor
+          // automático; senão, o valor automático da coluna.
           const skip = new Set([ctx.idCol.name, ctx.xCol.name, ctx.yCol.name, ctx.geomCol?.name]);
           const cols = ctx.columns.filter(
             (c) => !skip.has(c.name) && !c.isGenerated && !(c.readOnly && c.kind !== 'geometry'),
@@ -1244,13 +1490,14 @@ export class PointsService {
             target.push(qi(ctx.geomCol!.name));
             values.push(geom);
           }
-          const autoId = ctx.idCol.hasDefault || ctx.idCol.isIdentity || ctx.idCol.readOnly;
-          if (!autoId) {
-            if (ctx.idCol.kind !== 'integer' && ctx.idCol.kind !== 'number') {
-              throw new BadRequestException(
-                `Não é possível duplicar: a coluna de ID "${ctx.idCol.name}" não é numérica nem tem valor automático`,
-              );
-            }
+          const numericId =
+            (ctx.idCol.kind === 'integer' || ctx.idCol.kind === 'number') && !ctx.idCol.isGenerated;
+          if (!numericId && !ctx.idCol.hasDefault) {
+            throw new BadRequestException(
+              `Não é possível duplicar: a coluna de ID "${ctx.idCol.name}" não é numérica nem tem valor automático`,
+            );
+          }
+          if (numericId) {
             await tx.$executeRawUnsafe(
               `SELECT pg_advisory_xact_lock(hashtext($1))`,
               this.entity(ctx),
@@ -1261,10 +1508,11 @@ export class PointsService {
             );
           }
           rows = await tx.$queryRawUnsafe(
-            `INSERT INTO ${ctx.table} (${target.join(', ')})
+            `INSERT INTO ${ctx.table} (${target.join(', ')}) ${numericId && ctx.idCol.isIdentity ? 'OVERRIDING SYSTEM VALUE' : ''}
              SELECT ${values.join(', ')} FROM ${ctx.table} WHERE ${q.where} ${returning}`,
             ...params.values,
           );
+          if (numericId && ctx.idCol.hasDefault) await this.syncIdSequence(tx, ctx);
           await this.audit.logMany(
             rows.map((r) => ({
               userId,
@@ -1340,7 +1588,8 @@ export class PointsService {
           })),
           tx,
         );
-        await this.changes.logDelete(tx, ctx, [...new Set(removed.map((r) => r.id))], observation);
+        const unique = new Map(removed.map((r) => [r.id, r]));
+        await this.changes.logDelete(tx, ctx, [...unique.values()], observation);
         return { deleted };
       },
       { timeout: 120_000, maxWait: 10_000 },

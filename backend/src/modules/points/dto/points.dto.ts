@@ -255,6 +255,25 @@ export class TranslateDto extends IdsDto {
   observation?: string;
 }
 
+export class CopyToSourceDto extends IdsDto {
+  @ApiProperty({ description: 'Camada de destino' })
+  @IsUUID()
+  targetId: string;
+
+  @ApiProperty({
+    example: { medidor: 'medidor_nc', obs: null },
+    description: 'Coluna de origem → coluna de destino (null/ausente = não copiar)',
+  })
+  @IsObject()
+  mapping: Record<string, string | null>;
+
+  @ApiPropertyOptional({ description: 'Motivo da inclusão (Tabela de Alterações do destino)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  observation?: string;
+}
+
 export class BulkUpdateDto extends IdsDto {
   @ApiProperty({ example: { status: 'Ativo' } })
   @IsObject()

@@ -3,17 +3,30 @@ import clsx from 'clsx';
 import {
   ArrowDown,
   ArrowUp,
+  Calculator,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   FileText,
   ListChecks,
   Plus,
   RotateCcw,
+  Sigma,
   Table2,
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { queryKeys, useSources } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
+import {
+  NUMERIC_KINDS,
+  columnTitle,
+  compileColumns,
+  defaultColumns,
+  type Cell,
+  type ComparisonColumn,
+  type ComparisonColumnKind,
+} from '@/lib/comparisonColumns';
 import {
   comparisonService,
   type ComparisonRequest,
@@ -32,6 +45,7 @@ import { toast } from '../ui/Toaster';
 const SETTINGS_KEY = 'geoanalisys-comparison';
 const MAX_LAYERS = 10;
 const MAX_BLOCKS = 30;
+const MAX_COLUMNS = 60;
 
 type CondOp = Extract<FilterOp, 'eq' | 'neq' | 'contains' | 'isNull' | 'notNull'>;
 
@@ -60,6 +74,8 @@ interface Block {
   useLookup: boolean;
 }
 
+type OutColumn = ComparisonColumn & { id: string };
+
 interface Settings {
   layers: { sourceId: string; label: string }[];
   blocks: Block[];
@@ -68,15 +84,88 @@ interface Settings {
   lookupTable: string;
   lookupKeys: { column: string; lookupColumn: string }[];
   lookupName: string;
-  lookupFactor: string;
   ignoreCase: boolean;
   useFilters: boolean;
+  /** null = automáticas (descrição, grupos, quantidades, diferença e consumo × dif.) */
+  columns: OutColumn[] | null;
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
 
 const find = (cols: string[], re: RegExp, fallback: string) =>
   cols.find((c) => re.test(c)) ?? fallback;
+
+const KINDS: { value: ComparisonColumnKind; label: string }[] = [
+  { value: 'label', label: 'Descrição' },
+  { value: 'group', label: 'Coluna das camadas' },
+  { value: 'count', label: 'Quantidade da camada' },
+  { value: 'diff', label: 'Diferença (última − primeira)' },
+  { value: 'lookup', label: 'Coluna da tabela de apoio' },
+  { value: 'formula', label: 'Fórmula' },
+];
+
+/** Exemplo do censo: consumo (kWh/mês) do censo anterior e do atual, com as perdas da tabela de apoio. */
+function consumoColumns(cols: string[], lookupCols: string[], layerCount: number): OutColumn[] {
+  const potencia = find(cols, /^pot[eê]ncia$/i, 'potencia');
+  const perda = find(lookupCols, /^perdas?$/i, 'perda');
+  const last = Math.max(layerCount - 1, 1);
+  const consumo = (q: string) =>
+    `([${q}] * [${potencia}] + [${q}] * [Perdas]) * 11,483333333 * 30 / 1000`;
+  const out: ComparisonColumn[] = [
+    { kind: 'label', title: 'Descrição' },
+    { kind: 'group', title: null, column: potencia },
+    { kind: 'formula', title: 'Perdas', expression: `[${perda}] * [${potencia}]` },
+    { kind: 'count', title: 'Quantidade Censo Anterior', layer: 0, sum: true },
+    {
+      kind: 'formula',
+      title: 'Consumo Anterior',
+      expression: consumo('Quantidade Censo Anterior'),
+      sum: true,
+      decimals: 2,
+    },
+    { kind: 'count', title: 'Quantidade Censo Atual', layer: last, sum: true },
+    {
+      kind: 'formula',
+      title: 'Consumo Atual',
+      expression: consumo('Quantidade Censo Atual'),
+      sum: true,
+      decimals: 2,
+    },
+    {
+      kind: 'formula',
+      title: 'Diferença de Lâmpadas',
+      expression: '[Quantidade Censo Atual] - [Quantidade Censo Anterior]',
+      sum: true,
+      decimals: 0,
+    },
+    {
+      kind: 'formula',
+      title: 'Consumo Total',
+      expression: '[Consumo Atual] - [Consumo Anterior]',
+      sum: true,
+      decimals: 2,
+    },
+  ];
+  return out.map((c) => ({ ...c, id: newId() }));
+}
+
+/** Colunas automáticas: as padrão e, com a tabela de apoio, consumo e consumo × diferença. */
+function autoColumns(groupBy: string[], layerCount: number, lookupCols: string[] | null) {
+  const out: ComparisonColumn[] = defaultColumns(groupBy, layerCount);
+  const factor = lookupCols?.find((c) => /^consumo$/i.test(c));
+  if (factor) {
+    out.push(
+      { kind: 'lookup', title: null, column: factor },
+      {
+        kind: 'formula',
+        title: `${factor} × dif.`,
+        expression: `[${factor}] * [Diferença]`,
+        sum: true,
+      },
+    );
+  }
+  return out.map((c): OutColumn => ({ ...c, id: newId() }));
+}
 
 /** Estimados, Relés e Medidos (mesma lógica do script do censo) com os nomes de coluna das camadas. */
 function censoBlocks(cols: string[]): Block[] {
@@ -133,21 +222,38 @@ const DEFAULTS: Settings = {
     { column: 'potencia', lookupColumn: 'potencia' },
   ],
   lookupName: 'nome',
-  lookupFactor: 'consumo',
   ignoreCase: true,
   useFilters: false,
+  columns: null,
 };
 
 function loadSettings(): Partial<Settings> {
   try {
-    return JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as Partial<Settings>;
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') as Partial<Settings> & {
+      lookupFactor?: string;
+    };
+    delete saved.lookupFactor; // versões antigas: o fator agora é uma coluna
+    return saved;
   } catch {
     return {};
   }
 }
 
 const nf = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 4 });
-const fmtNum = (n: number | null) => (n === null ? '—' : nf.format(n));
+const fixed = new Map<number, Intl.NumberFormat>();
+function fmtNum(n: number, decimals: number | null) {
+  if (decimals === null) return nf.format(n);
+  if (!fixed.has(decimals)) {
+    fixed.set(
+      decimals,
+      new Intl.NumberFormat('pt-BR', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      }),
+    );
+  }
+  return fixed.get(decimals)!.format(n);
+}
 const signed = (n: number) => (n > 0 ? `+${fmtInt(n)}` : fmtInt(n));
 
 function ColumnSelect({
@@ -372,24 +478,230 @@ function BlockEditor({
             onChange={(e) => onChange({ useLookup: e.target.checked })}
             className="accent-accent-600"
           />
-          Usar a tabela de apoio (descrição e fator × diferença)
+          Usar a tabela de apoio (descrição e colunas da tabela)
         </label>
       )}
     </div>
   );
 }
 
+function ColumnsEditor({
+  items,
+  layers,
+  layerColumns,
+  lookupCols,
+  lookupOn,
+  onChange,
+}: {
+  items: OutColumn[];
+  /** Nomes das camadas, na ordem */
+  layers: string[];
+  layerColumns: string[];
+  lookupCols: string[];
+  lookupOn: boolean;
+  onChange: (next: OutColumn[]) => void;
+}) {
+  const set = (k: number, p: Partial<OutColumn>) =>
+    onChange(items.map((c, i) => (i === k ? { ...c, ...p } : c)));
+  const move = (k: number, delta: number) => {
+    const next = [...items];
+    const [c] = next.splice(k, 1);
+    next.splice(k + delta, 0, c);
+    onChange(next);
+  };
+  const setKind = (k: number, kind: ComparisonColumnKind) =>
+    set(k, {
+      kind,
+      column: kind === 'group' ? layerColumns[0] : kind === 'lookup' ? lookupCols[0] : null,
+      layer: kind === 'count' ? 0 : null,
+      expression: kind === 'formula' ? (items[k].expression ?? '') : null,
+      sum: ['count', 'diff', 'formula'].includes(kind),
+    });
+  return (
+    <div className="space-y-1.5">
+      {items.map((c, k) => {
+        const numeric = NUMERIC_KINDS.includes(c.kind);
+        return (
+          <div
+            key={c.id}
+            className={clsx(
+              'grid grid-cols-[1.25rem_11rem_minmax(0,1fr)_minmax(0,1.6fr)_4.5rem_auto_auto_auto_auto_auto] items-center gap-1.5',
+              c.hidden && 'opacity-60',
+            )}
+          >
+            <span className="text-right text-xs text-slate-400">{k + 1}.</span>
+            <Select
+              aria-label={`Tipo da coluna ${k + 1}`}
+              value={c.kind}
+              onChange={(e) => setKind(k, e.target.value as ComparisonColumnKind)}
+            >
+              {KINDS.filter((o) => o.value !== 'lookup' || lookupOn || c.kind === 'lookup').map(
+                (o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ),
+              )}
+            </Select>
+            <Input
+              aria-label={`Título da coluna ${k + 1}`}
+              value={c.title ?? ''}
+              placeholder={columnTitle({ ...c, title: null }, k, layers)}
+              onChange={(e) => set(k, { title: e.target.value })}
+            />
+            <div className="min-w-0">
+              {c.kind === 'group' && (
+                <ColumnSelect
+                  value={c.column ?? ''}
+                  options={layerColumns}
+                  onChange={(v) => set(k, { column: v })}
+                />
+              )}
+              {c.kind === 'lookup' && (
+                <ColumnSelect
+                  value={c.column ?? ''}
+                  options={lookupCols}
+                  onChange={(v) => set(k, { column: v })}
+                />
+              )}
+              {c.kind === 'count' && (
+                <Select
+                  aria-label={`Camada da coluna ${k + 1}`}
+                  value={String(c.layer ?? 0)}
+                  onChange={(e) => set(k, { layer: Number(e.target.value) })}
+                >
+                  {layers.map((l, i) => (
+                    <option key={i} value={i}>
+                      {i + 1}. {l}
+                    </option>
+                  ))}
+                  {(c.layer ?? 0) >= layers.length && (
+                    <option value={c.layer ?? 0}>{(c.layer ?? 0) + 1}. (não existe)</option>
+                  )}
+                </Select>
+              )}
+              {c.kind === 'formula' && (
+                <Input
+                  aria-label={`Fórmula da coluna ${k + 1}`}
+                  value={c.expression ?? ''}
+                  placeholder="ex.: [Quantidade Censo Atual] * potencia"
+                  onChange={(e) => set(k, { expression: e.target.value })}
+                  className="font-mono text-xs"
+                />
+              )}
+              {(c.kind === 'label' || c.kind === 'diff') && (
+                <span className="px-1 text-xs text-slate-400">
+                  {c.kind === 'label'
+                    ? 'nome da tabela de apoio ou valores do grupo'
+                    : `${layers[layers.length - 1] ?? ''} − ${layers[0] ?? ''}`}
+                </span>
+              )}
+            </div>
+            <Input
+              aria-label={`Casas decimais da coluna ${k + 1}`}
+              type="number"
+              min={0}
+              max={10}
+              placeholder="casas"
+              title="Casas decimais (vazio = automático)"
+              disabled={!numeric}
+              value={c.decimals ?? ''}
+              onChange={(e) =>
+                set(k, {
+                  decimals:
+                    e.target.value === ''
+                      ? null
+                      : Math.min(10, Math.max(0, Math.round(Number(e.target.value)))),
+                })
+              }
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`Somar a coluna ${k + 1} no total`}
+              aria-pressed={!!c.sum}
+              title={c.sum ? 'Somada na linha de total' : 'Não somada na linha de total'}
+              disabled={!numeric}
+              onClick={() => set(k, { sum: !c.sum })}
+              icon={
+                <Sigma
+                  className={clsx(
+                    'size-3.5',
+                    c.sum && numeric ? 'text-accent-600' : 'text-slate-300',
+                  )}
+                />
+              }
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={c.hidden ? `Mostrar a coluna ${k + 1}` : `Ocultar a coluna ${k + 1}`}
+              title={c.hidden ? 'Oculta (só para as fórmulas)' : 'Visível'}
+              onClick={() => set(k, { hidden: !c.hidden })}
+              icon={c.hidden ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`Subir a coluna ${k + 1}`}
+              disabled={k === 0}
+              onClick={() => move(k, -1)}
+              icon={<ArrowUp className="size-3.5" />}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`Descer a coluna ${k + 1}`}
+              disabled={k === items.length - 1}
+              onClick={() => move(k, 1)}
+              icon={<ArrowDown className="size-3.5" />}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`Remover a coluna ${k + 1}`}
+              disabled={items.length === 1}
+              onClick={() => onChange(items.filter((_, i) => i !== k))}
+              icon={<X className="size-3.5" />}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CellView({
+  value,
+  kind,
+  decimals,
+}: {
+  value: Cell;
+  kind: ComparisonColumnKind;
+  decimals: number | null;
+}) {
+  if (value === null) {
+    return <span className="text-slate-400">{kind === 'group' ? '(vazio)' : '—'}</span>;
+  }
+  if (typeof value !== 'number') return <>{value}</>;
+  if (kind === 'count') return <>{fmtInt(value)}</>;
+  if (kind === 'diff') return <>{signed(value)}</>;
+  return <>{fmtNum(value, decimals)}</>;
+}
+
 function SectionTable({
   section,
-  layers,
-  factorName,
+  columns,
 }: {
   section: ComparisonSection;
-  layers: string[];
-  factorName: string | null;
+  columns: ComparisonResult['summary']['columns'];
 }) {
-  const withFactor = section.lookup && factorName !== null;
-  const t = section.totals;
+  const numeric = (k: ComparisonColumnKind) => NUMERIC_KINDS.includes(k);
+  const totals = [...section.totals];
+  if (!totals.includes('Total')) {
+    const free = totals.findIndex((v) => v === null);
+    if (free >= 0) totals[free] = 'Total';
+  }
   return (
     <div>
       <p className="mb-1 text-sm font-semibold text-slate-800">
@@ -404,79 +716,56 @@ function SectionTable({
         <table className="w-full text-left text-xs">
           <thead className="sticky top-0 bg-slate-50 text-slate-500">
             <tr>
-              <th className="px-2 py-1 font-medium">Descrição</th>
-              {section.groupBy.map((g) => (
-                <th key={g} className="px-2 py-1 font-medium">
-                  {g}
+              {columns.map((c, i) => (
+                <th
+                  key={i}
+                  className={clsx('px-2 py-1 font-medium', numeric(c.kind) && 'text-right')}
+                >
+                  {c.title}
                 </th>
               ))}
-              {layers.map((l, i) => (
-                <th key={i} className="px-2 py-1 text-right font-medium">
-                  {l}
-                </th>
-              ))}
-              <th className="px-2 py-1 text-right font-medium">Diferença</th>
-              {withFactor && (
-                <>
-                  <th className="px-2 py-1 text-right font-medium">{factorName}</th>
-                  <th className="px-2 py-1 text-right font-medium">{factorName} × dif.</th>
-                </>
-              )}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 text-slate-800">
             {section.rows.map((r, k) => (
               <tr key={k} className={clsx(r.matched === false && 'bg-amber-50')}>
-                <td className="px-2 py-1">{r.label}</td>
-                {r.values.map((v, j) => (
-                  <td key={j} className="px-2 py-1 text-slate-600">
-                    {v ?? <span className="text-slate-400">(vazio)</span>}
-                  </td>
-                ))}
-                {r.counts.map((n, i) => (
-                  <td key={i} className="px-2 py-1 text-right tabular-nums">
-                    {fmtInt(n)}
-                  </td>
-                ))}
-                <td
-                  className={clsx(
-                    'px-2 py-1 text-right tabular-nums',
-                    r.diff > 0
-                      ? 'text-emerald-700'
-                      : r.diff < 0
-                        ? 'text-red-700'
-                        : 'text-slate-400',
-                  )}
-                >
-                  {signed(r.diff)}
-                </td>
-                {withFactor && (
-                  <>
-                    <td className="px-2 py-1 text-right tabular-nums">{fmtNum(r.factor)}</td>
-                    <td className="px-2 py-1 text-right tabular-nums">{fmtNum(r.result)}</td>
-                  </>
-                )}
+                {r.cells.map((v, i) => {
+                  const c = columns[i];
+                  return (
+                    <td
+                      key={i}
+                      className={clsx(
+                        'px-2 py-1',
+                        numeric(c.kind) && 'text-right tabular-nums',
+                        c.kind === 'group' && 'text-slate-600',
+                        c.kind === 'diff' &&
+                          typeof v === 'number' &&
+                          (v > 0 ? 'text-emerald-700' : v < 0 ? 'text-red-700' : 'text-slate-400'),
+                      )}
+                    >
+                      <CellView value={v} kind={c.kind} decimals={c.decimals} />
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
           {section.rows.length > 1 && (
             <tfoot className="sticky bottom-0 bg-slate-50 font-semibold text-slate-800">
               <tr>
-                <td className="px-2 py-1" colSpan={1 + section.groupBy.length}>
-                  Total
-                </td>
-                {t.counts.map((n, i) => (
-                  <td key={i} className="px-2 py-1 text-right tabular-nums">
-                    {fmtInt(n)}
+                {totals.map((v, i) => (
+                  <td
+                    key={i}
+                    className={clsx(
+                      'px-2 py-1',
+                      typeof v === 'number' && 'text-right tabular-nums',
+                    )}
+                  >
+                    {v !== null && (
+                      <CellView value={v} kind={columns[i].kind} decimals={columns[i].decimals} />
+                    )}
                   </td>
                 ))}
-                <td className="px-2 py-1 text-right tabular-nums">{signed(t.diff)}</td>
-                {withFactor && (
-                  <>
-                    <td />
-                    <td className="px-2 py-1 text-right tabular-nums">{fmtNum(t.result)}</td>
-                  </>
-                )}
               </tr>
             </tfoot>
           )}
@@ -487,7 +776,7 @@ function SectionTable({
 }
 
 /**
- * Ferramentas › Lista comparativa: conta os pontos de 2 ou mais camadas por grupos de atributos
+ * Ferramentas › Quadro Comparativo: conta os pontos de 2 ou mais camadas por grupos de atributos
  * (ex.: tipo_lampada e potencia), em blocos com condições (ex.: medicao = Não), lado a lado com a
  * diferença; opcionalmente com descrição e fator (ex.: consumo) de uma tabela de apoio (ex.: mlampadas).
  */
@@ -602,9 +891,46 @@ export default function ComparisonDialog() {
       ? { column: c.column, op: c.op }
       : { column: c.column, op: c.op, value: c.value, caseSensitive: !s.ignoreCase };
 
+  const layerNames = layers.map(
+    (l) => l.label.trim() || list.find((x) => x.id === l.sourceId)?.name || '',
+  );
+  /** Colunas da tabela de apoio para as colunas do quadro (null = desligada) */
+  const lookupForColumns = lookupOk ? lookupCols : null;
+  const lookupColsReady = !lookupOk || !!dbColumns.data;
+  const autoKey = JSON.stringify([
+    [...new Set(s.blocks.flatMap((b) => b.groupBy))],
+    layers.length,
+    lookupForColumns,
+  ]);
+  const autoCols = useMemo(() => {
+    const [groupBy, count, lk] = JSON.parse(autoKey) as [string[], number, string[] | null];
+    return autoColumns(groupBy, count, lk);
+  }, [autoKey]);
+  const outCols = s.columns ?? autoCols;
+  const setColumns = (next: OutColumn[] | null) => patch({ columns: next });
+  let columnsError: string | null = null;
+  if (schemasReady && lookupColsReady && outCols.length) {
+    try {
+      compileColumns(outCols, layerNames, {
+        layerColumns: columns,
+        lookupColumns: lookupForColumns,
+      });
+      if (outCols.every((c) => c.hidden)) columnsError = 'Deixe ao menos uma coluna visível';
+    } catch (err) {
+      columnsError = (err as Error).message;
+    }
+  }
+
   const blocksOk = s.blocks.length > 0 && s.blocks.every((b) => b.title.trim());
   const request: ComparisonRequest | null =
-    layers.length >= 2 && schemasReady && blocksOk && !missing.length && !lookupMissing.length
+    layers.length >= 2 &&
+    schemasReady &&
+    blocksOk &&
+    !missing.length &&
+    !lookupMissing.length &&
+    lookupColsReady &&
+    outCols.length > 0 &&
+    !columnsError
       ? {
           layers: layers.map((l) => ({
             sourceId: l.sourceId,
@@ -624,10 +950,19 @@ export default function ComparisonDialog() {
                 table: s.lookupTable,
                 keys: lookupKeys,
                 nameColumn: s.lookupName || null,
-                factorColumn: s.lookupFactor || null,
               }
             : null,
           ignoreCase: s.ignoreCase,
+          columns: outCols.map((c) => ({
+            kind: c.kind,
+            title: c.title?.trim() || null,
+            column: c.column ?? null,
+            layer: c.layer ?? null,
+            expression: c.expression ?? null,
+            hidden: !!c.hidden,
+            sum: !!c.sum,
+            decimals: c.decimals ?? null,
+          })),
         }
       : null;
 
@@ -652,8 +987,8 @@ export default function ComparisonDialog() {
     <Dialog
       open
       size="xl"
-      title="Lista comparativa"
-      description="Conta os pontos de 2 ou mais camadas agrupados por atributos (ex.: tipo_lampada e potencia), em blocos com condições (ex.: medicao = Não), e compara as camadas lado a lado."
+      title="Quadro Comparativo"
+      description="Conta os pontos de 2 ou mais camadas agrupados por atributos (ex.: tipo_lampada e potencia), em blocos com condições (ex.: medicao = Não), e compara as camadas lado a lado, com as colunas e fórmulas que você escolher."
       onClose={close}
       footer={
         <>
@@ -770,12 +1105,12 @@ export default function ComparisonDialog() {
             />
             Tabela de apoio
             <span className="text-xs font-normal text-slate-500">
-              descrição e fator por grupo (ex.: mlampadas: nome e consumo)
+              descrição e colunas por grupo (ex.: mlampadas: nome, consumo, perda)
             </span>
           </label>
           {s.lookupEnabled && (
             <>
-              <div className="grid gap-3 sm:grid-cols-4">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <div>
                   <Label htmlFor="cmp-lk-schema">Schema</Label>
                   <ColumnSelect
@@ -802,18 +1137,6 @@ export default function ComparisonDialog() {
                     options={lookupCols}
                     empty="(nenhuma)"
                     onChange={(v) => patch({ lookupName: v })}
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="cmp-lk-factor" hint="× diferença">
-                    Fator
-                  </Label>
-                  <ColumnSelect
-                    id="cmp-lk-factor"
-                    value={s.lookupFactor}
-                    options={lookupCols}
-                    empty="(nenhum)"
-                    onChange={(v) => patch({ lookupFactor: v })}
                   />
                 </div>
               </div>
@@ -948,6 +1271,67 @@ export default function ComparisonDialog() {
           )}
         </section>
 
+        <section className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="mr-auto text-xs font-medium text-slate-600">
+              Colunas da tabela{' '}
+              <span className="font-normal text-slate-400">
+                {s.columns ? '(em ordem; as ocultas só servem às fórmulas)' : '(automáticas)'}
+              </span>
+            </p>
+            {s.columns && (
+              <Button
+                size="sm"
+                icon={<RotateCcw className="size-3.5" />}
+                onClick={() => setColumns(null)}
+                title="Descrição, colunas de agrupamento, quantidade por camada e diferença"
+              >
+                Automáticas
+              </Button>
+            )}
+            <Button
+              size="sm"
+              icon={<Calculator className="size-3.5" />}
+              onClick={() => setColumns(consumoColumns(columns, lookupCols, layers.length))}
+              title="Descrição, potência, perdas, quantidade e consumo dos censos anterior e atual, diferença de lâmpadas e consumo total"
+            >
+              Modelo de consumo
+            </Button>
+            <Button
+              size="sm"
+              icon={<Plus className="size-3.5" />}
+              disabled={outCols.length >= MAX_COLUMNS}
+              onClick={() =>
+                setColumns([
+                  ...outCols,
+                  { id: newId(), kind: 'formula', title: '', expression: '', sum: true },
+                ])
+              }
+            >
+              Coluna
+            </Button>
+          </div>
+          <ColumnsEditor
+            items={outCols}
+            layers={layerNames}
+            layerColumns={columns}
+            lookupCols={lookupCols}
+            lookupOn={lookupOk}
+            onChange={setColumns}
+          />
+          {columnsError && <p className="text-xs text-amber-700">{columnsError}</p>}
+          <p className="text-xs text-slate-500">
+            Fórmulas: use <code>[Título de outra coluna]</code> ou o nome de uma coluna das camadas
+            ou da tabela de apoio (ex.: <code>potencia</code>, <code>perda</code>); operadores{' '}
+            <code>+ - * / ^</code> e parênteses; decimal com vírgula ou ponto; funções{' '}
+            <code>arred(x; casas)</code>, <code>abs</code>, <code>min</code>, <code>max</code> e{' '}
+            <code>sevazio(x; y)</code> (argumentos separados por <code>;</code>). Se um valor
+            estiver vazio (ex.: bloco sem a coluna ou sem correspondência na tabela de apoio), o
+            resultado fica vazio. <Sigma className="inline size-3" /> soma a coluna na linha de
+            total.
+          </p>
+        </section>
+
         {result && summary && (
           <section className="space-y-3 border-t border-slate-200 pt-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -984,12 +1368,7 @@ export default function ComparisonDialog() {
               </p>
             )}
             {result.data.sections.map((sec, k) => (
-              <SectionTable
-                key={k}
-                section={sec}
-                layers={summary.layers}
-                factorName={summary.factorName}
-              />
+              <SectionTable key={k} section={sec} columns={summary.columns} />
             ))}
           </section>
         )}

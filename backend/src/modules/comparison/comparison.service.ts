@@ -14,6 +14,16 @@ import {
   indexLookup,
   mergeCounts,
 } from './comparison.logic';
+import {
+  Cell,
+  ComparisonColumn,
+  CompiledColumns,
+  FormulaError,
+  NUMERIC_KINDS,
+  compileColumns,
+  defaultColumns,
+  roundCell,
+} from './comparison.columns';
 
 /** Linhas lidas da tabela de apoio (ex.: mlampadas tem algumas centenas). */
 const MAX_LOOKUP_ROWS = 200_000;
@@ -44,8 +54,6 @@ export interface ComparisonLookup {
   keys: { column: string; lookupColumn: string }[];
   /** Descrição da linha (ex.: nome) */
   nameColumn: string | null;
-  /** Multiplicado pela diferença (ex.: consumo) */
-  factorColumn: string | null;
 }
 
 export interface ComparisonRequest {
@@ -54,18 +62,13 @@ export interface ComparisonRequest {
   lookup: ComparisonLookup | null;
   /** "Não" = "nao" = "NÃO" ao juntar os grupos das camadas e a tabela de apoio */
   ignoreCase: boolean;
+  /** Colunas da tabela, em ordem; null = padrão (descrição, grupos, quantidades e diferença) */
+  columns: ComparisonColumn[] | null;
 }
 
 export interface ComparisonRow {
-  label: string;
-  /** Valores das colunas de agrupamento do bloco */
-  values: (string | null)[];
-  counts: number[];
-  /** Última camada − primeira */
-  diff: number;
-  factor: number | null;
-  /** factor × diff */
-  result: number | null;
+  /** Uma por coluna visível */
+  cells: Cell[];
   /** null = bloco sem tabela de apoio */
   matched: boolean | null;
 }
@@ -76,17 +79,9 @@ export interface ComparisonSection {
   distinctColumn: string | null;
   lookup: boolean;
   rows: ComparisonRow[];
-  totals: { counts: number[]; diff: number; result: number | null };
+  /** Soma das colunas marcadas para somar; "Total" na descrição */
+  totals: Cell[];
   unmatched: number;
-}
-
-const round = (n: number) => Math.round(n * 1e6) / 1e6;
-
-function parseNumber(v: string | null): number | null {
-  if (v === null) return null;
-  const s = v.trim();
-  const n = Number(/^[+-]?\d+,\d+$/.test(s) ? s.replace(',', '.') : s);
-  return s && Number.isFinite(n) ? n : null;
 }
 
 @Injectable()
@@ -103,8 +98,25 @@ export class ComparisonService {
     const started = Date.now();
     const ctxs = await Promise.all(req.layers.map((l) => this.sources.context(l.sourceId)));
     const labels = req.layers.map((l, i) => l.label?.trim() || ctxs[i].source.name);
+    const columns =
+      req.columns ??
+      defaultColumns([...new Set(req.blocks.flatMap((b) => b.groupBy))], labels.length);
+    const layerColumns = [...ctxs[0].colMap.values()]
+      .filter((c) => c.kind !== 'geometry' && ctxs.every((x) => x.colMap.has(c.name)))
+      .map((c) => c.name);
+    const lookupCols = req.lookup ? await this.lookupColumns(req.lookup) : null;
+    let compiled: CompiledColumns;
+    try {
+      compiled = compileColumns(columns, labels, { layerColumns, lookupColumns: lookupCols });
+    } catch (err) {
+      if (err instanceof FormulaError) throw new BadRequestException(err.message);
+      throw err;
+    }
+    const visible = columns.map((_, i) => i).filter((i) => !columns[i].hidden);
     const lookup =
-      req.blocks.some((b) => b.useLookup) && req.lookup ? await this.loadLookup(req) : null;
+      req.blocks.some((b) => b.useLookup) && req.lookup
+        ? await this.loadLookup(req, compiled.lookupColumns)
+        : null;
 
     const sections: ComparisonSection[] = [];
     for (const block of req.blocks) {
@@ -124,8 +136,7 @@ export class ComparisonService {
         req.layers.map((l, i) => this.count(ctxs[i], labels[i], l.filters, block)),
       );
       const last = req.layers.length - 1;
-      const rows = mergeCounts(perLayer, req.ignoreCase).map((m): ComparisonRow => {
-        const diff = m.counts[last] - m.counts[0];
+      const rows = mergeCounts(perLayer, req.ignoreCase).map((m) => {
         const found = useLookup
           ? findLookup(
               lookup!,
@@ -133,43 +144,51 @@ export class ComparisonService {
               req.ignoreCase,
             )
           : null;
-        const factor = found?.factor ?? null;
         const label =
           found?.name ||
           (block.groupBy.length ? m.keys.map((k) => k ?? '(vazio)').join(' · ') : block.title);
-        return {
+        const all = compiled.evaluate({
           label,
-          values: m.keys,
+          group: new Map(block.groupBy.map((g, k) => [g, m.keys[k]])),
           counts: m.counts,
-          diff,
-          factor,
-          result: factor === null ? null : round(factor * diff),
-          matched: useLookup ? found !== null : null,
-        };
+          diff: m.counts[last] - m.counts[0],
+          lookup: found?.values ?? null,
+        });
+        return { label, keys: m.keys, all, matched: useLookup ? found !== null : null };
       });
-      rows.sort((a, b) =>
-        compareRows({ label: a.label, keys: a.values }, { label: b.label, keys: b.values }),
-      );
-      const hasFactor = useLookup && req.lookup!.factorColumn !== null;
+      rows.sort(compareRows);
+      const totals = visible.map((i): Cell => {
+        const c = columns[i];
+        if (c.kind === 'label') return 'Total';
+        if (!c.sum || !NUMERIC_KINDS.includes(c.kind)) return null;
+        const sum = rows.reduce((s, r) => {
+          const v = r.all[i];
+          return s + (typeof v === 'number' ? v : 0);
+        }, 0);
+        return roundCell(sum, c.decimals);
+      });
       sections.push({
         title: block.title,
         groupBy: block.groupBy,
         distinctColumn: block.distinctColumn,
         lookup: useLookup,
-        rows,
-        totals: {
-          counts: labels.map((_, i) => rows.reduce((s, r) => s + r.counts[i], 0)),
-          diff: rows.reduce((s, r) => s + r.diff, 0),
-          result: hasFactor ? round(rows.reduce((s, r) => s + (r.result ?? 0), 0)) : null,
-        },
+        rows: rows.map((r) => ({
+          cells: visible.map((i) => roundCell(r.all[i], columns[i].decimals)),
+          matched: r.matched,
+        })),
+        totals,
         unmatched: useLookup ? rows.filter((r) => !r.matched).length : 0,
       });
     }
 
     const summary = {
       layers: labels,
+      columns: visible.map((i) => ({
+        title: compiled.titles[i],
+        kind: columns[i].kind,
+        decimals: columns[i].decimals ?? null,
+      })),
       lookupName: lookup ? `${req.lookup!.schema}.${req.lookup!.table}` : null,
-      factorName: lookup ? req.lookup!.factorColumn : null,
       rows: sections.reduce((s, x) => s + x.rows.length, 0),
       unmatched: sections.reduce((s, x) => s + x.unmatched, 0),
       durationMs: Date.now() - started,
@@ -177,51 +196,20 @@ export class ComparisonService {
     this.logger.log({
       event: 'comparison',
       ...summary,
+      columns: summary.columns.length,
       sourceIds: req.layers.map((l) => l.sourceId),
       blocks: req.blocks.length,
     });
-    return { summary, sections };
+    return { summary, sections, columns, titles: compiled.titles };
   }
 
   async download(req: ComparisonRequest, format: 'xlsx' | 'csv', res: Response) {
-    const { summary: s, sections } = await this.run(req);
-    const groupCols = [...new Set(sections.flatMap((x) => x.groupBy))];
-    const withFactor = s.factorName !== null && sections.some((x) => x.lookup);
-    const headers = [
-      'Bloco',
-      'Descrição',
-      ...groupCols,
-      ...s.layers.map((l) => `Qtd ${l}`),
-      `Diferença (${s.layers[s.layers.length - 1]} − ${s.layers[0]})`,
-      ...(withFactor ? [s.factorName!, `${s.factorName} × diferença`] : []),
-    ];
-    const line = (
-      title: string,
-      label: string,
-      values: Map<string, string | null>,
-      r: {
-        counts: number[];
-        diff: number;
-        factor?: number | null;
-        result: number | null;
-      },
-    ) => [
-      title,
-      label,
-      ...groupCols.map((c) => values.get(c) ?? null),
-      ...r.counts,
-      r.diff,
-      ...(withFactor ? [r.factor ?? null, r.result] : []),
-    ];
+    const { summary: s, sections, columns, titles } = await this.run(req);
+    const headers = ['Bloco', ...s.columns.map((c) => c.title)];
     const body: { cells: unknown[]; total: boolean }[] = [];
     for (const x of sections) {
-      for (const r of x.rows) {
-        const values = new Map(x.groupBy.map((c, k) => [c, r.values[k]]));
-        body.push({ cells: line(x.title, r.label, values, r), total: false });
-      }
-      if (x.rows.length > 1) {
-        body.push({ cells: line(x.title, `Total ${x.title}`, new Map(), x.totals), total: true });
-      }
+      for (const r of x.rows) body.push({ cells: [x.title, ...r.cells], total: false });
+      if (x.rows.length > 1) body.push({ cells: [x.title, ...x.totals], total: true });
     }
 
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
@@ -252,10 +240,17 @@ export class ComparisonService {
     wb.creator = 'GeoAnalisys';
     wb.created = new Date();
     const sheet = wb.addWorksheet('Comparativo', { views: [{ state: 'frozen', ySplit: 1 }] });
-    sheet.columns = headers.map((h, k) => ({
-      header: h,
-      width: k === 1 ? 40 : Math.min(Math.max(h.length + 2, 12), 40),
-    }));
+    sheet.columns = headers.map((h, k) => {
+      const c = k > 0 ? s.columns[k - 1] : null;
+      const d = c?.decimals;
+      return {
+        header: h,
+        width: c?.kind === 'label' ? 40 : Math.min(Math.max(h.length + 2, 12), 40),
+        ...(d !== null && d !== undefined
+          ? { style: { numFmt: d > 0 ? `#,##0.${'0'.repeat(d)}` : '#,##0' } }
+          : {}),
+      };
+    });
     sheet.getRow(1).font = { bold: true };
     for (const b of body) {
       const row = sheet.addRow(b.cells);
@@ -269,6 +264,17 @@ export class ComparisonService {
     ];
     info.getRow(1).font = { bold: true };
     const lk = req.lookup;
+    const describe = (c: ComparisonColumn) =>
+      ({
+        label: 'descrição',
+        group: `coluna ${c.column}`,
+        count: `quantidade em ${s.layers[c.layer ?? 0]}`,
+        diff: `${s.layers[s.layers.length - 1]} − ${s.layers[0]}`,
+        lookup: `${s.lookupName ?? 'tabela de apoio'}.${c.column}`,
+        formula: `= ${c.expression}`,
+      })[c.kind] +
+      (c.hidden ? '; oculta' : '') +
+      (c.sum && NUMERIC_KINDS.includes(c.kind) ? '; somada no total' : '');
     info.addRows([
       ...req.layers.map((l, i) => [
         `Camada ${i + 1}`,
@@ -280,8 +286,7 @@ export class ComparisonService {
         'Tabela de apoio',
         lk && s.lookupName
           ? `${s.lookupName} (${lk.keys.map((k) => `${k.column} = ${k.lookupColumn}`).join(', ')}` +
-            `${lk.nameColumn ? `; descrição: ${lk.nameColumn}` : ''}` +
-            `${lk.factorColumn ? `; fator: ${lk.factorColumn}` : ''})`
+            `${lk.nameColumn ? `; descrição: ${lk.nameColumn}` : ''})`
           : 'Não usada',
       ],
       ...req.blocks.map((b, i) => [
@@ -295,6 +300,7 @@ export class ComparisonService {
           .filter(Boolean)
           .join('; '),
       ]),
+      ...columns.map((c, i) => [`Coluna ${i + 1}: ${titles[i]}`, describe(c)]),
       ['Sem correspondência na tabela de apoio', s.unmatched],
       ['Gerado em', new Date().toISOString()],
     ]);
@@ -345,14 +351,21 @@ export class ComparisonService {
       .filter((r) => groups.length === 0 || r.n > 0);
   }
 
-  private async loadLookup(req: ComparisonRequest): Promise<Map<string, LookupRow>> {
-    const lk = req.lookup!;
+  private async lookupColumns(lk: ComparisonLookup): Promise<string[]> {
     const cols = await this.catalog.getColumns(lk.schema, lk.table);
     if (!cols.length)
       throw new BadRequestException(`Tabela de apoio não encontrada: ${lk.schema}.${lk.table}`);
-    const byName = new Map(cols.map((c) => [c.name, c]));
+    return cols.filter((c) => c.kind !== 'geometry').map((c) => c.name);
+  }
+
+  private async loadLookup(
+    req: ComparisonRequest,
+    extra: string[],
+  ): Promise<Map<string, LookupRow>> {
+    const lk = req.lookup!;
+    const names = new Set(await this.lookupColumns(lk));
     const col = (name: string) => {
-      if (!byName.has(name)) {
+      if (!names.has(name)) {
         throw new BadRequestException(`Coluna "${name}" não existe em ${lk.schema}.${lk.table}`);
       }
       return `${qi(name)}::text`;
@@ -360,7 +373,7 @@ export class ComparisonService {
     const select = [
       ...lk.keys.map((k, i) => `${col(k.lookupColumn)} AS "k${i}"`),
       `${lk.nameColumn ? col(lk.nameColumn) : 'NULL::text'} AS "name"`,
-      `${lk.factorColumn ? col(lk.factorColumn) : 'NULL::text'} AS "factor"`,
+      ...extra.map((c, i) => `${col(c)} AS "v${i}"`),
     ];
     const raw = await this.prisma.$queryRawUnsafe<Record<string, string | null>[]>(
       `SELECT ${select.join(', ')} FROM ${qualified(lk.schema, lk.table)} LIMIT ${MAX_LOOKUP_ROWS}`,
@@ -369,7 +382,7 @@ export class ComparisonService {
       raw.map((r) => ({
         keys: lk.keys.map((_, i) => r[`k${i}`] ?? null),
         name: r.name?.trim() || null,
-        factor: parseNumber(r.factor),
+        values: Object.fromEntries(extra.map((c, i) => [c, r[`v${i}`] ?? null])),
       })),
       req.ignoreCase,
     );

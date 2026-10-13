@@ -35,6 +35,7 @@ import {
   SearchQueryDto,
   SelectionDto,
   SummaryDto,
+  CopyToSourceDto,
   TranslateDto,
   UpdatePointDto,
 } from './dto/points.dto';
@@ -161,6 +162,21 @@ export class PointsController {
       dto.mode,
       dto.from,
       dto.to,
+      user,
+      dto.observation,
+    );
+  }
+
+  @Post('copy-to-source')
+  @ApiOperation({
+    summary: 'Duplica registros em outra camada, com pareamento de atributos (transação)',
+  })
+  copyToSource(@Body() dto: CopyToSourceDto, @CurrentUser() user: string) {
+    return this.points.copyToSource(
+      dto.sourceId,
+      dto.ids,
+      dto.targetId,
+      dto.mapping,
       user,
       dto.observation,
     );

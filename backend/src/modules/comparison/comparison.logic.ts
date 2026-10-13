@@ -14,7 +14,8 @@ export interface MergedRow {
 export interface LookupRow {
   keys: (string | null)[];
   name: string | null;
-  factor: number | null;
+  /** Colunas da tabela de apoio usadas pelas colunas do quadro (texto) */
+  values: Record<string, string | null>;
 }
 
 const NUMERIC = /^[+-]?\d+(?:[.,]\d+)?$/;

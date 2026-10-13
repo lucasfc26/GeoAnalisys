@@ -1,5 +1,6 @@
 import clsx from 'clsx';
 import {
+  ArrowLeftRight,
   AlertTriangle,
   ChevronDown,
   ChevronRight,
@@ -258,6 +259,11 @@ function LayerRow({
       label: layer.label.enabled ? 'Rótulos (ligados)…' : 'Rótulos…',
       icon: <Type className="size-3.5" />,
       onSelect: () => openDialog('layerStyle', { sourceId: id, tab: 'labels' }),
+    },
+    {
+      label: 'Converter coordenadas (lat/long ↔ UTM)…',
+      icon: <ArrowLeftRight className="size-3.5" />,
+      onSelect: () => openDialog('convertCoords', { sourceId: id }),
     },
     {
       label: 'Aproximar da camada',

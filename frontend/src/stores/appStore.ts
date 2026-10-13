@@ -38,6 +38,14 @@ export interface SearchWindow {
   sourceId: string;
 }
 
+/** Modo lista: percorrer os valores um a um ou selecionar todos os pontos da lista de uma vez. */
+export type ListMode = 'walk' | 'all';
+
+export interface ListWindow extends SearchWindow {
+  /** Modo inicial da janela */
+  mode?: ListMode;
+}
+
 const windowId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
 export type FormState =
@@ -81,7 +89,7 @@ interface AppState {
   transform: TransformMode | null;
   /** Painel do modo lista aberto */
   /** Janelas do modo lista: várias, cada uma presa à camada em que foi aberta */
-  listWindows: SearchWindow[];
+  listWindows: ListWindow[];
   /** Janelas "Selecionar por valor" abertas (várias, cada uma na sua camada) */
   searchWindows: SearchWindow[];
   /** Mapa de fundo */
@@ -125,7 +133,8 @@ interface AppState {
     bulkEdit: boolean;
     filters: boolean;
     form: FormState;
-    confirmDelete: { ids: string[] } | null;
+    /** `sourceId`: camada dos registros (padrão: a ativa); `observation`: motivo já preenchido */
+    confirmDelete: { ids: string[]; sourceId?: string; observation?: string } | null;
     layerStyle: { sourceId: string; tab: 'symbology' | 'labels' } | null;
     /** Tabela de Alterações */
     changes: boolean;
@@ -133,6 +142,8 @@ interface AppState {
     importLayer: boolean;
     /** Copiar os pontos selecionados para uma nova camada */
     copyToLayer: boolean;
+    /** Camadas › Converter coordenadas (grava lat/lng ↔ UTM na tabela) */
+    convertCoords: { sourceId: string } | null;
     /** Criar mapa HTML (Comitê / Status 18) */
     mapMaker: boolean;
     /** Ferramentas › Associar Camadas */
@@ -143,7 +154,9 @@ interface AppState {
     outsideBoundary: boolean;
     /** Ferramentas › Distância por atributo */
     attributeDistance: boolean;
-    /** Ferramentas › Lista comparativa */
+    /** Duplicar selecionados: na camada atual (arrastar) ou em outra camada (pareando atributos) */
+    duplicate: boolean;
+    /** Ferramentas › Quadro Comparativo */
     comparison: boolean;
     /** Sobre › Atalhos */
     shortcuts: boolean;
@@ -173,7 +186,7 @@ interface AppState {
   dropBoundary: (dragId: string, targetId: string, where: 'before' | 'after') => void;
   setTool: (tool: Tool) => void;
   setTransform: (mode: TransformMode | null) => void;
-  openListWindow: (sourceId: string) => void;
+  openListWindow: (sourceId: string, mode?: ListMode) => void;
   closeListWindow: (id: string) => void;
   /** Abre mais uma janela "Selecionar por valor" para a camada */
   openSearchWindow: (sourceId: string) => void;
@@ -224,11 +237,13 @@ const closedDialogs: AppState['dialogs'] = {
   changes: false,
   importLayer: false,
   copyToLayer: false,
+  convertCoords: null,
   mapMaker: false,
   associate: false,
   duplicates: false,
   outsideBoundary: false,
   attributeDistance: false,
+  duplicate: false,
   comparison: false,
   shortcuts: false,
 };
@@ -430,8 +445,8 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           transform: transform && Object.keys(s.selection).length ? transform : null,
         })),
-      openListWindow: (sourceId) =>
-        set((s) => ({ listWindows: [...s.listWindows, { id: windowId(), sourceId }] })),
+      openListWindow: (sourceId, mode) =>
+        set((s) => ({ listWindows: [...s.listWindows, { id: windowId(), sourceId, mode }] })),
       closeListWindow: (id) =>
         set((s) => ({ listWindows: s.listWindows.filter((w) => w.id !== id) })),
       openSearchWindow: (sourceId) =>

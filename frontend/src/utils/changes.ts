@@ -14,9 +14,31 @@ export function fmtChangeList(values: unknown[]): string {
   return values.length ? `[${values.map(fmtChangeValue).join(', ')}]` : '';
 }
 
-/** Texto da coluna Observação (igual ao do XLSX gerado no backend). */
-export function changeObservation(action: ChangeAction, observation: string | null): string {
-  if (action === 'CREATE') return `Adicionado: ${observation ?? ''}`.trim();
-  if (action === 'DELETE') return `Removido: ${observation ?? ''}`.trim();
-  return 'Ponto Alterado';
+const fold = (s: string) =>
+  s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+/** "Prefixo: observação", sem repetir o prefixo se a observação já começa com ele. */
+function prefixed(prefix: string, observation: string | null): string {
+  const obs = observation?.trim() ?? '';
+  if (!obs) return prefix;
+  if (fold(obs).startsWith(fold(prefix))) return obs;
+  return `${prefix}: ${obs}`;
+}
+
+/**
+ * Texto da coluna Observação (igual ao do backend, sem a lista de atributos): adicionado e alterado
+ * depois ganha " e Alterado".
+ */
+export function changeObservation(
+  action: ChangeAction,
+  observation: string | null,
+  attributes: string[] = [],
+): string {
+  if (action === 'CREATE')
+    return `${prefixed('Adicionado', observation)}${attributes.length ? ' e Alterado' : ''}`;
+  if (action === 'DELETE') return prefixed('Removido', observation);
+  return observation?.trim() ? `Ponto Alterado: ${observation.trim()}` : 'Ponto Alterado';
 }

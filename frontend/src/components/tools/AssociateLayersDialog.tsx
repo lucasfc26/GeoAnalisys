@@ -1,6 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
-import { FileSpreadsheet, FileText, Link2, Loader2, Plus, Trash2 } from 'lucide-react';
+import { FileSpreadsheet, FileText, Layers, Link2, Loader2, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useSourceSchema, useSources } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
 import {
@@ -34,6 +35,7 @@ import { Dialog } from '../ui/Dialog';
 import { Input, Label, Select } from '../ui/Field';
 import { toast } from '../ui/Toaster';
 import { AssociationColumnPicker } from './AssociationColumnPicker';
+import { AssociationLayerDialog } from './AssociationLayerDialog';
 import { StatusRulesEditor } from './StatusRulesEditor';
 
 const SETTINGS_KEY = 'geoanalisys-association';
@@ -242,6 +244,7 @@ export default function AssociateLayersDialog() {
       setDownloading(null);
     }
   };
+  const [layerOpen, setLayerOpen] = useState(false);
   const stale = !!result && result.key !== requestKey;
   const summary = result?.data.summary;
 
@@ -272,6 +275,14 @@ export default function AssociateLayersDialog() {
             onClick={() => void download('xlsx')}
           >
             Baixar XLSX
+          </Button>
+          <Button
+            icon={<Layers className="size-4" />}
+            disabled={!request || !!downloading}
+            title="Grava o resultado como camada no schema GeoAnalisysTemp (nova ou substituindo uma existente)"
+            onClick={() => setLayerOpen(true)}
+          >
+            Camada temporária
           </Button>
           <Button
             variant="primary"
@@ -658,6 +669,18 @@ export default function AssociateLayersDialog() {
             </div>
           </div>
         )}
+        {layerOpen &&
+          request &&
+          // No body: dentro desta janela o backdrop-filter prenderia o `fixed` da outra.
+          createPortal(
+            <AssociationLayerDialog
+              request={request}
+              nameA={a?.name ?? 'A'}
+              nameB={b?.name ?? 'B'}
+              onClose={() => setLayerOpen(false)}
+            />,
+            document.body,
+          )}
       </div>
     </Dialog>
   );

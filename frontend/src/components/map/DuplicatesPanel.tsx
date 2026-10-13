@@ -7,6 +7,7 @@ import {
   MousePointerClick,
   ScanSearch,
   Settings2,
+  Trash2,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { usePreviewConfig } from '@/hooks/usePreviewConfig';
@@ -24,6 +25,8 @@ import { PreviewFrame } from './PreviewFrame';
 import { PreviewSettings } from './PreviewSettings';
 
 const num = (n: number) => n.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+/** Motivo sugerido ao excluir um registro pela lista (pode ser reescrito) */
+const DELETE_OBSERVATION = 'Removido: Duplicidade';
 /** Frames de fotos abertos ao mesmo tempo (grupos grandes mostram os primeiros pontos). */
 const MAX_FRAMES = 6;
 
@@ -62,6 +65,8 @@ function Panel({
   result: NonNullable<ReturnType<typeof useDuplicatesStore.getState>['result']>;
 }) {
   const setPanelOpen = useDuplicatesStore((s) => s.setPanelOpen);
+  const deletedIds = useDuplicatesStore((s) => s.deletedIds);
+  const deleted = useMemo(() => new Set(deletedIds), [deletedIds]);
   const openDialog = useAppStore((s) => s.openDialog);
   const [current, setCurrent] = useState<number | null>(null);
   /** Pontos em análise (o par ou o grupo clicado), mostrados nos frames de fotos */
@@ -277,7 +282,15 @@ function Panel({
                   pair={pairs[k]}
                   active={k === current}
                   refName={summary.referenceName}
+                  deleted={deleted}
                   onShow={() => show(k)}
+                  onDelete={(id) =>
+                    openDialog('confirmDelete', {
+                      ids: [id],
+                      sourceId,
+                      observation: DELETE_OBSERVATION,
+                    })
+                  }
                 />
               ))}
             </ul>
@@ -293,16 +306,29 @@ function PairRow({
   pair: p,
   active,
   refName,
+  deleted,
   onShow,
+  onDelete,
 }: {
   id: string;
   pair: DupPair;
   active: boolean;
   refName: string | null;
+  /** Registros já excluídos da camada */
+  deleted: Set<string>;
   onShow: () => void;
+  onDelete: (id: string) => void;
 }) {
   const refText = (v: unknown) =>
     v === null || v === undefined ? 'sem associação' : `${refName} ${String(v)}`;
+  const pointId = (pid: string) =>
+    deleted.has(pid) ? (
+      <span className="text-red-600 line-through" title="Excluído">
+        {pid}
+      </span>
+    ) : (
+      pid
+    );
   return (
     <li id={id}>
       <button
@@ -316,7 +342,7 @@ function PairRow({
       >
         <span className="flex flex-wrap items-baseline gap-x-2">
           <span className="font-medium text-slate-800">
-            {p.a.id} ↔ {p.b.id}
+            {pointId(p.a.id)} ↔ {pointId(p.b.id)}
           </span>
           <span className="text-slate-500">
             {p.sameCoord ? 'mesma coordenada' : `${num(p.distance)} m`}
@@ -337,6 +363,24 @@ function PairRow({
           </span>
         )}
       </button>
+      {active && (
+        <div className="flex flex-wrap items-center gap-1.5 bg-accent-50 px-3 pb-1.5">
+          {[p.a.id, p.b.id].map((pid) => (
+            <Button
+              key={pid}
+              size="sm"
+              variant="ghost"
+              className="text-red-600"
+              icon={<Trash2 className="size-3.5" />}
+              disabled={deleted.has(pid)}
+              title={deleted.has(pid) ? 'Registro já excluído' : `Excluir o registro ${pid}`}
+              onClick={() => onDelete(pid)}
+            >
+              {deleted.has(pid) ? `${pid} excluído` : `Excluir ${pid}`}
+            </Button>
+          ))}
+        </div>
+      )}
     </li>
   );
 }

@@ -15,6 +15,7 @@ import { pointsService } from '@/services/points';
 import { crsService } from '@/services/sources';
 import { useAppStore } from '@/stores/appStore';
 import { useDuplicatesStore } from '@/stores/duplicatesStore';
+import { useToolListsStore } from '@/stores/toolListsStore';
 import type { Bounds, LatLng, MapCluster } from '@/types';
 import { fmtInt, fmtValue } from '@/utils/format';
 import { LayersPanel } from '../layers/LayersPanel';
@@ -22,7 +23,9 @@ import { ErrorState } from '../ui/States';
 import { toast } from '../ui/Toaster';
 import { BasemapControl, BoundariesLayer } from './BaseLayers';
 import { DrawingController } from './DrawingController';
+import { AttributeDistancePanel } from './AttributeDistancePanel';
 import { DuplicatesPanel } from './DuplicatesPanel';
+import { OutsideBoundaryPanel } from './OutsideBoundaryPanel';
 import { ListModePanel } from './ListModePanel';
 import { MeasureController } from './MeasureController';
 import { SelectByValuePanel } from './SelectByValuePanel';
@@ -224,6 +227,8 @@ export default function MapView() {
   const viewHidden = useAppStore((s) => s.viewHidden);
   const listWindows = useAppStore((s) => s.listWindows);
   const duplicatesOpen = useDuplicatesStore((s) => s.panelOpen && !!s.result);
+  const outsideOpen = useToolListsStore((s) => s.outsideOpen && !!s.outside);
+  const attrDistOpen = useToolListsStore((s) => s.attrDistOpen && !!s.attrDist);
   const selection = useAppStore((s) => s.selection);
   const setSelection = useAppStore((s) => s.setSelection);
   const toggleGroup = useAppStore((s) => s.toggleGroup);
@@ -498,7 +503,13 @@ export default function MapView() {
       {tool === 'measure' && <MeasureController />}
       {/* Uma janela do modo lista por L/clique, cada uma presa à camada (mantém o estado). */}
       {listWindows.map((w, i) => (
-        <ListModePanel key={w.id} windowId={w.id} sourceId={w.sourceId} index={i} />
+        <ListModePanel
+          key={w.id}
+          windowId={w.id}
+          sourceId={w.sourceId}
+          index={i}
+          initialMode={w.mode}
+        />
       ))}
       {/* Uma janela por F3/clique, cada uma presa à camada em que foi aberta. */}
       {searchWindows.map((w, i) => (
@@ -511,6 +522,8 @@ export default function MapView() {
         />
       ))}
       {duplicatesOpen && <DuplicatesPanel />}
+      {outsideOpen && <OutsideBoundaryPanel />}
+      {attrDistOpen && <AttributeDistancePanel />}
       <BasemapControl hidden={viewHidden.maps} />
       <BoundariesLayer />
       <TransformController overlay={overlayRef} sourceId={sourceId} />
