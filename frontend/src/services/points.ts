@@ -17,6 +17,15 @@ import type {
 
 const f = (filters: FilterDef[]) => (filters.length ? filters : undefined);
 
+/** Operação que o Ctrl+Z desfaz: as alterações gravadas juntas (ex.: uma edição em massa). */
+export interface UndoInfo {
+  txId: string;
+  at: string;
+  /** Registros afetados */
+  total: number;
+  parts: { sourceId: string; sourceName: string; action: string; label: string; count: number }[];
+}
+
 export const pointsService = {
   bbox: (
     sourceId: string,
@@ -162,6 +171,43 @@ export const pointsService = {
       from,
       to,
       observation,
+    }),
+
+  /** Última operação do usuário que o Ctrl+Z desfaz (null = nenhuma). */
+  lastUndo: () => api.get<{ last: UndoInfo | null }>('/points/undo'),
+
+  /** Desfaz a operação `txId` (precisa ainda ser a última do usuário). */
+  undo: (txId: string) =>
+    api.post<{
+      undone: UndoInfo;
+      reverted: number;
+      removed: number;
+      restored: number;
+      /** Registros que já não existiam (ou já tinham voltado) */
+      skipped: number;
+      sourceIds: string[];
+    }>('/points/undo', { txId }),
+
+  /** Último desfazer do usuário que o Ctrl+Y refaz (null = nenhum); partes = operação desfeita. */
+  lastRedo: () => api.get<{ next: UndoInfo | null }>('/points/redo'),
+
+  /** Refaz o desfazer `txId` (precisa ainda ser o próximo a refazer). */
+  redo: (txId: string) =>
+    api.post<{
+      redone: UndoInfo;
+      reverted: number;
+      removed: number;
+      restored: number;
+      skipped: number;
+      sourceIds: string[];
+    }>('/points/redo', { txId }),
+
+  /** Move cada registro de `sourceId` para a posição do registro pareado de `targetId`. */
+  snap: (sourceId: string, targetId: string, pairs: { id: string; targetId: string }[]) =>
+    api.post<{ count: number; skipped: number; groups: SelectedGroup[] }>('/points/snap', {
+      sourceId,
+      targetId,
+      pairs,
     }),
 
   bulkDelete: (sourceId: string, ids: string[], observation?: string) =>

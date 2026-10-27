@@ -22,3 +22,13 @@ BEGIN
       ON gis_app.alteracoes (project_id, source_id, record_id);
   END IF;
 END $$;
+
+-- Histórico (desfazer): coluna txId criada sem valor padrão, para as linhas antigas ficarem vazias
+-- (com o padrão txid_current() já no ADD COLUMN, todas receberiam o mesmo id e virariam uma
+-- única operação). O push depois só acrescenta o padrão.
+DO $$
+BEGIN
+  IF to_regclass('gis_app.audit_log') IS NOT NULL THEN
+    ALTER TABLE gis_app.audit_log ADD COLUMN IF NOT EXISTS "txId" BIGINT;
+  END IF;
+END $$;

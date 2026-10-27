@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Loader2 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { queryKeys, useActiveSource, useCrsList } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
 import { kmlFileToGeoJson } from '@/lib/kml';
@@ -8,7 +8,9 @@ import {
   TEMP_SCHEMA,
   layersService,
   withTempSchema,
+  type ImportJob,
   type ImportPreview,
+  type ImportResult,
   type ImportType,
 } from '@/services/layers';
 import { pointsService } from '@/services/points';
@@ -27,6 +29,35 @@ const TYPE_LABEL: Record<ImportType, string> = {
 };
 const ACCEPT = '.csv,.txt,.tsv,.xlsx,.xlsm,.geojson,.json,.kml';
 const baseName = (f: string) => f.replace(/\.[^.]+$/, '');
+/** Intervalo entre as consultas do andamento da importação */
+const POLL_MS = 1000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const fmtSize = (bytes: number) =>
+  bytes >= 1 << 30
+    ? `${(bytes / (1 << 30)).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} GB`
+    : `${(bytes / (1 << 20)).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MB`;
+
+/** Barra de progresso; `value` null = sem porcentagem (só animação). */
+function ProgressBar({ value, label }: { value: number | null; label: string }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-between text-xs text-slate-600">
+        <span>{label}</span>
+        {value !== null && <span className="tabular-nums">{Math.round(value * 100)}%</span>}
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+        <div
+          className={
+            value === null
+              ? 'h-full w-1/3 animate-pulse rounded-full bg-accent-500'
+              : 'h-full rounded-full bg-accent-600 transition-[width] duration-500'
+          }
+          style={value === null ? undefined : { width: `${Math.max(value * 100, 1)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 /**
  * Importa um CSV/XLSX (uma aba), GeoJSON ou KML como nova camada: vira uma tabela no banco, igual às
@@ -51,6 +82,12 @@ export default function ImportLayerDialog() {
   const [fileName, setFileName] = useState('');
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [reading, setReading] = useState(false);
+  /** Envio do arquivo (0–1); null = não está enviando */
+  const [uploading, setUploading] = useState<number | null>(null);
+  const abortUpload = useRef<(() => void) | null>(null);
+  /** Importação em andamento */
+  const [job, setJob] = useState<ImportJob | null>(null);
+  const jobRef = useRef<string | null>(null);
   const [name, setName] = useState('');
   const [schema, setSchema] = useState('');
   const [idColumn, setIdColumn] = useState('');
@@ -68,11 +105,36 @@ export default function ImportLayerDialog() {
   // Padrão: GeoAnalisysTemp (tabela apagada ao remover a camada do mapa).
   const schemaValue = schema || TEMP_SCHEMA;
 
-  /** Lê o arquivo (ou outra aba) e aplica as sugestões de colunas. */
+  // Fechar a janela no meio: cancela o envio e a importação.
+  useEffect(
+    () => () => {
+      abortUpload.current?.();
+      if (jobRef.current) void layersService.cancelImport(jobRef.current).catch(() => undefined);
+    },
+    [],
+  );
+
+  /**
+   * Envia o arquivo (com barra de progresso) ou, numa troca de aba, reaproveita o já enviado; lê só
+   * o começo e aplica as sugestões de colunas.
+   */
   const read = async (f: File, sheet?: string | null) => {
     setReading(true);
     try {
-      const p = await layersService.preview(f, sheet);
+      let p: ImportPreview;
+      if (sheet !== undefined && preview?.uploadId) {
+        p = await layersService.preview(preview.uploadId, sheet);
+      } else {
+        setUploading(0);
+        const up = layersService.upload(f, setUploading);
+        abortUpload.current = up.abort;
+        try {
+          p = await up.promise;
+        } finally {
+          abortUpload.current = null;
+          setUploading(null);
+        }
+      }
       setPreview(p);
       setTypes(Object.fromEntries(p.headers.map((h, i) => [h, p.types[i]])));
       setIdColumn(p.suggested.idColumn ?? '');
@@ -101,22 +163,46 @@ export default function ImportLayerDialog() {
     }
   };
 
+  /** Começa a importação e acompanha o andamento até terminar. */
+  const importFile = async (): Promise<ImportResult> => {
+    const p = preview!;
+    // Só os tipos trocados pelo usuário ficam fixos; os detectados podem alargar no resto do arquivo.
+    const chosen = Object.fromEntries(
+      p.headers.flatMap((h, i) => (types[h] && types[h] !== p.types[i] ? [[h, types[h]]] : [])),
+    );
+    const { jobId } = await layersService.startImport(p.uploadId, {
+      sheet: p.sheet ?? null,
+      name: name.trim(),
+      schema: schemaValue,
+      idColumn: idColumn || null,
+      xColumn: coordMode === 'xy' ? xColumn : null,
+      yColumn: coordMode === 'xy' ? yColumn : null,
+      coordColumn: coordMode === 'pair' ? coordColumn : null,
+      convertCoordinates: convertCoords,
+      coordinateSystem: crs,
+      labelColumn: labelColumn || null,
+      categoryColumn: categoryColumn || null,
+      types: chosen,
+    });
+    jobRef.current = jobId;
+    setJob({ id: jobId, phase: 'reading', rows: 0, percent: 0 });
+    try {
+      for (;;) {
+        await sleep(POLL_MS);
+        const s = await layersService.importStatus(jobId);
+        setJob(s);
+        if (s.phase === 'done' && s.result) return s.result;
+        if (s.phase === 'error') throw new Error(s.error ?? 'Erro ao importar');
+        if (s.phase === 'cancelled') throw new Error('Importação cancelada.');
+      }
+    } finally {
+      jobRef.current = null;
+      setJob(null);
+    }
+  };
+
   const run = useMutation({
-    mutationFn: () =>
-      layersService.import(file!, {
-        sheet: preview?.sheet ?? null,
-        name: name.trim(),
-        schema: schemaValue,
-        idColumn: idColumn || null,
-        xColumn: coordMode === 'xy' ? xColumn : null,
-        yColumn: coordMode === 'xy' ? yColumn : null,
-        coordColumn: coordMode === 'pair' ? coordColumn : null,
-        convertCoordinates: convertCoords,
-        coordinateSystem: crs,
-        labelColumn: labelColumn || null,
-        categoryColumn: categoryColumn || null,
-        types,
-      }),
+    mutationFn: importFile,
     onSuccess: async (r) => {
       await qc.invalidateQueries({ queryKey: queryKeys.sources });
       qc.invalidateQueries({ queryKey: ['db-schemas'] });
@@ -140,7 +226,9 @@ export default function ImportLayerDialog() {
   });
 
   const headers = preview?.headers ?? [];
+  const busy = reading || run.isPending;
   const ready =
+    !busy &&
     !!file &&
     !!preview &&
     !!name.trim() &&
@@ -169,26 +257,59 @@ export default function ImportLayerDialog() {
       onClose={() => closeDialog('importLayer')}
       footer={
         <>
-          <Button onClick={() => closeDialog('importLayer')}>Cancelar</Button>
+          {job ? (
+            <Button
+              onClick={() => void layersService.cancelImport(job.id).catch(() => undefined)}
+              title="Para a importação e apaga a tabela criada"
+            >
+              Cancelar importação
+            </Button>
+          ) : uploading !== null ? (
+            <Button onClick={() => abortUpload.current?.()}>Cancelar envio</Button>
+          ) : (
+            <Button onClick={() => closeDialog('importLayer')}>Cancelar</Button>
+          )}
           <Button
             variant="primary"
             onClick={() => run.mutate()}
             loading={run.isPending}
             disabled={!ready}
           >
-            Importar {preview ? `${fmtInt(preview.total)} registro(s)` : ''}
+            Importar{' '}
+            {preview?.total !== null && preview?.total !== undefined
+              ? `${fmtInt(preview.total)} registro(s)`
+              : ''}
           </Button>
         </>
       }
     >
       <div className="space-y-4">
+        {uploading !== null && (
+          <ProgressBar
+            value={uploading}
+            label={`Enviando o arquivo${file ? ` (${fmtSize(file.size)})` : ''}…`}
+          />
+        )}
+        {uploading === null && reading && (
+          <ProgressBar value={null} label="Lendo as primeiras linhas…" />
+        )}
+        {job && (
+          <ProgressBar
+            value={job.phase === 'reading' ? job.percent : null}
+            label={
+              job.phase === 'indexing'
+                ? `${fmtInt(job.rows)} registros gravados — criando índices e registrando a camada…`
+                : `Importando… ${fmtInt(job.rows)} registros gravados`
+            }
+          />
+        )}
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <Label>Arquivo</Label>
             <Button
               icon={<FileUp className="size-4" />}
               onClick={() => inputRef.current?.click()}
-              disabled={reading}
+              disabled={busy}
             >
               {file ? 'Trocar arquivo' : 'Escolher arquivo…'}
             </Button>
@@ -218,6 +339,9 @@ export default function ImportLayerDialog() {
           </div>
           {file && <span className="pb-2 text-sm text-slate-700">{fileName}</span>}
           {reading && <Loader2 className="mb-2 size-4 animate-spin text-accent-600" />}
+          {preview && !reading && (
+            <span className="pb-2 text-xs text-slate-500">{fmtSize(preview.size)}</span>
+          )}
           {preview && preview.sheets.length > 0 && (
             <div className="min-w-48">
               <Label htmlFor="imp-sheet">Aba (sheet)</Label>
@@ -225,7 +349,7 @@ export default function ImportLayerDialog() {
                 id="imp-sheet"
                 value={preview.sheet ?? ''}
                 onChange={(e) => file && void read(file, e.target.value)}
-                disabled={reading}
+                disabled={busy}
               >
                 {preview.sheets.map((s) => (
                   <option key={s} value={s}>
@@ -387,9 +511,12 @@ export default function ImportLayerDialog() {
 
             <div>
               <p className="mb-1.5 text-xs text-slate-500">
-                Prévia ({fmtInt(Math.min(preview.rows.length, 10))} de {fmtInt(preview.total)}{' '}
-                linhas) — confira o tipo de cada coluna; valores que não forem do tipo escolhido
-                ficam vazios.
+                {preview.total !== null
+                  ? `Prévia (${fmtInt(Math.min(preview.rows.length, 10))} de ${fmtInt(preview.total)} linhas)`
+                  : `Prévia (primeiras ${fmtInt(Math.min(preview.rows.length, 10))} linhas — arquivo grande: o total aparece ao importar)`}{' '}
+                — confira o tipo de cada coluna. Tipos detectados nas primeiras linhas se ajustam
+                sozinhos se o resto do arquivo pedir; um tipo que você trocar fica fixo, e valores
+                que não forem dele ficam vazios.
               </p>
               <div className="scroll-thin max-h-72 overflow-auto rounded-md border border-slate-200">
                 <table className="w-full text-left text-xs">

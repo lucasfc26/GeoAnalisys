@@ -22,6 +22,7 @@ import { MapsModule } from './modules/maps/maps.module';
 import { PointsModule } from './modules/points/points.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { TablesModule } from './modules/tables/tables.module';
+import { ToolTemplatesModule } from './modules/templates/templates.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 /** Em produção (npm run start) o backend também serve o build do frontend. */
@@ -50,6 +51,7 @@ const staticModules: DynamicModule[] = existsSync(join(FRONTEND_DIST, 'index.htm
     ComparisonModule,
     LayersModule,
     ProjectsModule,
+    ToolTemplatesModule,
     HealthModule,
     ...staticModules,
   ],

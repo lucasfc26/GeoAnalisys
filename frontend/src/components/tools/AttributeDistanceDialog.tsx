@@ -19,6 +19,7 @@ import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Input, Label, Select } from '../ui/Field';
 import { toast } from '../ui/Toaster';
+import { ToolTemplateBar } from './ToolTemplateBar';
 
 const SETTINGS_KEY = 'geoanalisys-attribute-distance';
 const MAX_DISTANCE = 1_000_000;
@@ -275,6 +276,12 @@ export default function AttributeDistanceDialog() {
       }
     >
       <div className="space-y-4">
+        <ToolTemplateBar
+          tool="attribute-distance"
+          settings={s}
+          onApply={(saved) => setS({ ...DEFAULTS, ...saved })}
+        />
+
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <Label htmlFor="ad-layer" hint="ex.: Censo Atual">

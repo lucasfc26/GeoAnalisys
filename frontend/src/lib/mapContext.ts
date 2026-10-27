@@ -19,9 +19,3 @@ export function useSetMap() {
 
 /** Posição (lat/lng) de um evento de mouse do mapa. */
 export const eventLatLng = (e: MapMouseEvent): LatLng => ({ lat: e.lngLat.lat, lng: e.lngLat.lng });
-
-/** Ctrl/Shift/⌘ pressionado no evento (seleção aditiva). */
-export const isAdditive = (e: MapMouseEvent) => {
-  const o = e.originalEvent as MouseEvent | undefined;
-  return !!(o && (o.ctrlKey || o.metaKey || o.shiftKey));
-};

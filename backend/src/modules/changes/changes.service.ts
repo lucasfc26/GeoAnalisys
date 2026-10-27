@@ -3,8 +3,9 @@ import { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import type { Response } from 'express';
 import { currentProjectId } from '../../common/project-context';
+import { normalizeValue, qi, selectExpr } from '../../common/sql';
 import { PrismaService } from '../../prisma/prisma.service';
-import type { SourceContext } from '../tables/sources.service';
+import { SourceContext, SourcesService } from '../tables/sources.service';
 import {
   ChangeAction,
   ChangeEntry,
@@ -56,7 +57,10 @@ function projectFilter(column: string, param: number): { sql: string; params: st
  */
 @Injectable()
 export class ChangesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly sources: SourcesService,
+  ) {}
 
   /** Colunas comparáveis, na ordem da tabela (a geometria acompanha X/Y e fica de fora). */
   private order(ctx: SourceContext) {
@@ -397,10 +401,14 @@ export class ChangesService {
   /**
    * XLSX: Tabela | ID | Observação | <atributo> old … | <atributo> new … — uma coluna por atributo
    * alterado (em qualquer linha); números como número (o Excel em PT-BR usa a vírgula decimal).
+   * `ids` = só essas linhas (ex.: as filtradas ou marcadas na tela); ausente = todas.
+   * `fill` = preenche os atributos dessas colunas que o ponto não alterou (old = new = valor atual;
+   * adicionado: só new; removido: só old, o valor guardado na remoção).
    */
-  async exportXlsx(res: Response) {
-    const rows = await this.list();
+  async exportXlsx(res: Response, ids?: string[], fill = false) {
+    const rows = ids ? await this.rows(ids) : await this.list();
     const attrs = attributeColumns(rows);
+    const filled = fill && attrs.length ? await this.fillValues(rows, attrs) : null;
     const wb = new ExcelJS.Workbook();
     wb.creator = 'GeoAnalisys';
     wb.created = new Date();
@@ -420,6 +428,14 @@ export class ChangesService {
     for (const r of rows) {
       const old = new Map(r.attributes.map((a, i) => [a, r.oldValues[i]]));
       const now = new Map(r.attributes.map((a, i) => [a, r.newValues[i]]));
+      const extra = filled?.get(r.id);
+      if (extra) {
+        for (const [a, v] of extra) {
+          if (old.has(a) || now.has(a)) continue;
+          if (r.action !== 'CREATE') old.set(a, v);
+          if (r.action !== 'DELETE') now.set(a, v);
+        }
+      }
       sheet.addRow([
         r.sourceName,
         xlsxValue(r.recordId),
@@ -438,5 +454,62 @@ export class ChangesService {
     res.setHeader('Cache-Control', 'no-store');
     await wb.xlsx.write(res);
     res.end();
+  }
+
+  /**
+   * Valores dos atributos `attrs` por linha da tabela: os atuais do ponto na camada ou, nos
+   * removidos, os guardados na remoção. Camada excluída ou sem a coluna: fica sem o valor.
+   */
+  private async fillValues(rows: ChangeRow[], attrs: string[]) {
+    const out = new Map<string, Map<string, unknown>>();
+    const bySource = new Map<string, ChangeRow[]>();
+    for (const r of rows) {
+      if (r.action === 'DELETE') continue;
+      bySource.set(r.sourceId, [...(bySource.get(r.sourceId) ?? []), r]);
+    }
+    for (const [sourceId, list] of bySource) {
+      let ctx: SourceContext;
+      try {
+        ctx = await this.sources.context(sourceId);
+      } catch {
+        continue;
+      }
+      const cols = attrs.flatMap((a) => {
+        const c = ctx.colMap.get(a);
+        return c && c.kind !== 'geometry' ? [c] : [];
+      });
+      if (!cols.length) continue;
+      const byRecord = new Map(list.map((r) => [r.recordId, r.id]));
+      const recordIds = [...byRecord.keys()];
+      for (let i = 0; i < recordIds.length; i += CHUNK) {
+        const found = await this.prisma.$queryRawUnsafe<Record<string, unknown>[]>(
+          `SELECT ${qi(ctx.idCol.name)}::text AS "__id", ${cols.map((c, k) => selectExpr(c, `__v${k}`)).join(', ')}
+             FROM ${ctx.table} WHERE ${qi(ctx.idCol.name)}::text = ANY($1::text[])`,
+          recordIds.slice(i, i + CHUNK),
+        );
+        for (const f of found) {
+          const id = byRecord.get(String(f.__id));
+          if (!id) continue;
+          out.set(id, new Map(cols.map((c, k) => [c.name, normalizeValue(f[`__v${k}`], c.kind)])));
+        }
+      }
+    }
+    const removed = rows.filter((r) => r.action === 'DELETE').map((r) => r.id);
+    for (let i = 0; i < removed.length; i += CHUNK) {
+      const snaps = await this.prisma.$queryRawUnsafe<
+        { id: string; attributes: string[] | null; old_values: unknown[] | null }[]
+      >(
+        `SELECT id::text AS id, attributes, old_values FROM alteracoes WHERE id = ANY($1::bigint[])`,
+        removed.slice(i, i + CHUNK),
+      );
+      for (const s of snaps) {
+        const values = new Map<string, unknown>();
+        (s.attributes ?? []).forEach((a, k) => {
+          if (attrs.includes(a)) values.set(a, s.old_values?.[k] ?? null);
+        });
+        out.set(s.id, values);
+      }
+    }
+    return out;
   }
 }

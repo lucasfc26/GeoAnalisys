@@ -51,8 +51,15 @@ export const changesService = {
     fd.append('file', file);
     return request<ChangeImportResult>('/changes/import', { method: 'POST', body: fd });
   },
-  async downloadXlsx() {
-    const res = await rawRequest('/changes/xlsx');
+  /**
+   * `ids` = só essas linhas (ausente = todas); `fill` = preenche os atributos das colunas do arquivo
+   * que o ponto não alterou (valor atual do ponto).
+   */
+  async downloadXlsx(ids?: string[], fill = false) {
+    const res =
+      ids || fill
+        ? await rawRequest('/changes/xlsx', { method: 'POST', body: JSON.stringify({ ids, fill }) })
+        : await rawRequest('/changes/xlsx');
     const href = URL.createObjectURL(await res.blob());
     triggerDownload(href, filenameFrom(res, 'alteracoes.xlsx'));
     setTimeout(() => URL.revokeObjectURL(href), 10_000);

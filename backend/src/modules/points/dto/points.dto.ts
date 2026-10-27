@@ -12,6 +12,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -290,4 +291,27 @@ export class ReplaceDto {
   @ApiProperty({ example: { medicao: 'Estimado' } })
   @IsObject()
   changes: Record<string, unknown>;
+}
+
+export class SnapPairDto {
+  @IsString() @MaxLength(200) id: string;
+  @IsString() @MaxLength(200) targetId: string;
+}
+
+export class SnapToDto {
+  /** Camada dos registros que serão movidos */
+  @IsUUID() sourceId: string;
+  /** Camada dos pontos de destino */
+  @IsUUID() targetId: string;
+
+  @IsArray()
+  @ArrayMaxSize(MAX_IDS)
+  @ValidateNested({ each: true })
+  @Type(() => SnapPairDto)
+  pairs: SnapPairDto[];
+}
+
+export class UndoDto {
+  /** Transação da operação consultada em GET /points/undo */
+  @IsString() @Matches(/^\d{1,20}$/) txId: string;
 }

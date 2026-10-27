@@ -12,6 +12,7 @@ import {
 import { useAppStore } from '@/stores/appStore';
 import type { FilterDef, SourceSchema } from '@/types';
 import {
+  ADDRESS_LABEL,
   AGGREGATES_LABEL,
   associationColumns,
   criterionLabel,
@@ -35,22 +36,27 @@ import { Dialog } from '../ui/Dialog';
 import { Input, Label, Select } from '../ui/Field';
 import { toast } from '../ui/Toaster';
 import { AssociationColumnPicker } from './AssociationColumnPicker';
+import { AssociationFixSection } from './AssociationFixSection';
 import { AssociationLayerDialog } from './AssociationLayerDialog';
 import { StatusRulesEditor } from './StatusRulesEditor';
+import { ToolTemplateBar } from './ToolTemplateBar';
 
 const SETTINGS_KEY = 'geoanalisys-association';
 const MAX_DISTANCE = 5000;
-/** Uma vaga do backend fica para a prioridade de agregados */
+/** Duas vagas do backend ficam para as prioridades de endereço e de agregados */
 const MAX_CRITERIA = 19;
-const MIN_WEIGHT = 0.01;
-const MAX_WEIGHT = 1000;
+const ADDRESS_COLUMN = /endere/i;
+/** Penalidade de prioridade e custo de ponto sem par, em metros */
+const MAX_PENALTY = 1_000_000;
+/** Penalidade de uma prioridade nova */
+const DEFAULT_PENALTY = '10';
 
 interface Criterion {
   columnA: string;
   columnB: string;
   /** Texto do campo (número em metros) */
   maxDistance: string;
-  /** Texto do campo; ausente nas configurações salvas antes dos pesos */
+  /** Penalidade em metros quando não atendida (texto do campo); ausente nas configurações antigas */
   weight?: string;
 }
 
@@ -63,6 +69,14 @@ interface Settings {
   /** Texto do campo (número em metros) */
   aggregatesDistance: string;
   aggregatesWeight: string;
+  /** Prioridade de endereço parecido; colunas vazias = a coluna "endereco" de cada camada */
+  address: boolean;
+  addressColumnA: string;
+  addressColumnB: string;
+  addressDistance: string;
+  addressWeight: string;
+  /** Custo em metros de deixar um ponto sem par (texto do campo; vazio = sem limite) */
+  unmatchedCost: string;
   useFilters: boolean;
   includeUnmatchedB: boolean;
   /** Colunas do arquivo (escolha e ordem); vazio = padrão */
@@ -70,6 +84,8 @@ interface Settings {
   /** Regras de Status por rótulo da prioridade */
   status: Record<string, StatusRuleState>;
   statusNames: StatusValueNames;
+  /** Status gerado → nome escolhido no resultado */
+  statusRenames: Record<string, string>;
 }
 
 function loadSettings(): Partial<Settings> {
@@ -78,6 +94,31 @@ function loadSettings(): Partial<Settings> {
   } catch {
     return {};
   }
+}
+
+/** Configurações salvas (localStorage ou template) completadas com os padrões. */
+function settingsFrom(saved: Partial<Settings>, activeId: string | null): Settings {
+  return {
+    aId: saved.aId ?? activeId ?? '',
+    bId: saved.bId ?? '',
+    maxDistance: saved.maxDistance ?? '25',
+    criteria: saved.criteria ?? [],
+    aggregates: saved.aggregates ?? false,
+    aggregatesDistance: saved.aggregatesDistance ?? saved.maxDistance ?? '25',
+    aggregatesWeight: saved.aggregatesWeight ?? DEFAULT_PENALTY,
+    address: saved.address ?? false,
+    addressColumnA: saved.addressColumnA ?? '',
+    addressColumnB: saved.addressColumnB ?? '',
+    addressDistance: saved.addressDistance ?? saved.maxDistance ?? '25',
+    addressWeight: saved.addressWeight ?? DEFAULT_PENALTY,
+    unmatchedCost: saved.unmatchedCost ?? '',
+    useFilters: saved.useFilters ?? false,
+    includeUnmatchedB: saved.includeUnmatchedB ?? false,
+    columns: saved.columns ?? [],
+    status: saved.status ?? {},
+    statusNames: saved.statusNames ?? {},
+    statusRenames: saved.statusRenames ?? {},
+  };
 }
 
 /** Colunas que podem ser comparadas (sem geometria). */
@@ -90,13 +131,20 @@ function parseDistance(s: string): number | null {
   return Number.isFinite(n) && n > 0 && n <= MAX_DISTANCE ? n : null;
 }
 
-/** Peso válido (MIN_WEIGHT ≤ p ≤ MAX_WEIGHT) ou null; vazio = 1. */
+/** Penalidade válida em metros (0 ≤ p ≤ MAX_PENALTY) ou null; vazio = 1. */
 function parseWeight(s: string | undefined): number | null {
   if (!s?.trim()) return 1;
   const n = Number(s.replace(',', '.'));
-  return Number.isFinite(n) && n >= MIN_WEIGHT && n <= MAX_WEIGHT ? n : null;
+  return Number.isFinite(n) && n >= 0 && n <= MAX_PENALTY ? n : null;
 }
-const WEIGHT_ERROR = `Peso entre ${MIN_WEIGHT.toLocaleString('pt-BR')} e ${fmtInt(MAX_WEIGHT)}.`;
+const WEIGHT_ERROR = `Penalidade entre 0 e ${fmtInt(MAX_PENALTY)} m.`;
+
+/** Custo de ponto sem par em metros; vazio = sem limite (null); inválido = undefined. */
+function parseUnmatchedCost(s: string): number | null | undefined {
+  if (!s.trim()) return null;
+  const n = Number(s.replace(',', '.'));
+  return Number.isFinite(n) && n >= 0 && n <= MAX_PENALTY ? n : undefined;
+}
 
 const cellText = (v: unknown) => (v === null || v === undefined ? '' : String(v));
 
@@ -106,23 +154,7 @@ export default function AssociateLayersDialog() {
   const sources = useSources();
   const list = useMemo(() => sources.data ?? [], [sources.data]);
 
-  const [s, setS] = useState<Settings>(() => {
-    const saved = loadSettings();
-    return {
-      aId: saved.aId ?? activeId ?? '',
-      bId: saved.bId ?? '',
-      maxDistance: saved.maxDistance ?? '25',
-      criteria: saved.criteria ?? [],
-      aggregates: saved.aggregates ?? false,
-      aggregatesDistance: saved.aggregatesDistance ?? saved.maxDistance ?? '25',
-      aggregatesWeight: saved.aggregatesWeight ?? '1',
-      useFilters: saved.useFilters ?? false,
-      includeUnmatchedB: saved.includeUnmatchedB ?? false,
-      columns: saved.columns ?? [],
-      status: saved.status ?? {},
-      statusNames: saved.statusNames ?? {},
-    };
-  });
+  const [s, setS] = useState<Settings>(() => settingsFrom(loadSettings(), activeId));
   const patch = (p: Partial<Settings>) => setS((cur) => ({ ...cur, ...p }));
   useEffect(() => {
     try {
@@ -147,12 +179,36 @@ export default function AssociateLayersDialog() {
   const addCriterion = () => {
     const columnA = colsA.find((c) => /medicao/i.test(c)) ?? colsA[0] ?? '';
     const columnB = colsB.includes(columnA) ? columnA : (colsB[0] ?? '');
-    patch({ criteria: [...s.criteria, { columnA, columnB, maxDistance: s.maxDistance, weight: '1' }] });
+    patch({ criteria: [...s.criteria, { columnA, columnB, maxDistance: s.maxDistance, weight: DEFAULT_PENALTY }] });
   };
+
+  const addressA =
+    (colsA.includes(s.addressColumnA) && s.addressColumnA) ||
+    colsA.find((c) => ADDRESS_COLUMN.test(c)) ||
+    '';
+  const addressB =
+    (colsB.includes(s.addressColumnB) && s.addressColumnB) ||
+    (colsB.includes(addressA) && addressA) ||
+    colsB.find((c) => ADDRESS_COLUMN.test(c)) ||
+    '';
+  const addressDistance = parseDistance(s.addressDistance);
+  const addressWeight = parseWeight(s.addressWeight);
+  const addressError = !s.address
+    ? null
+    : !addressA
+      ? `Escolha a coluna de endereço de ${a?.name ?? 'A'}.`
+      : !addressB
+        ? `Escolha a coluna de endereço de ${b?.name ?? 'B'}.`
+        : addressDistance === null
+          ? `Distância entre 0 e ${fmtInt(MAX_DISTANCE)} m.`
+          : addressWeight === null
+            ? WEIGHT_ERROR
+            : null;
 
   const maxDistance = parseDistance(s.maxDistance);
   const aggregatesDistance = parseDistance(s.aggregatesDistance);
   const aggregatesWeight = parseWeight(s.aggregatesWeight);
+  const unmatchedCost = parseUnmatchedCost(s.unmatchedCost);
   const criteriaErrors = s.criteria.map((c) =>
     !colsA.includes(c.columnA)
       ? `A coluna "${c.columnA}" não existe em ${a?.name ?? 'A'}.`
@@ -166,8 +222,12 @@ export default function AssociateLayersDialog() {
   );
 
   const critLabels = useMemo(
-    () => [...s.criteria.map(criterionLabel), ...(s.aggregates ? [AGGREGATES_LABEL] : [])],
-    [s.criteria, s.aggregates],
+    () => [
+      ...s.criteria.map(criterionLabel),
+      ...(s.address ? [ADDRESS_LABEL] : []),
+      ...(s.aggregates ? [AGGREGATES_LABEL] : []),
+    ],
+    [s.criteria, s.address, s.aggregates],
   );
   const statusRuleOf = (key: string) => s.status[key] ?? defaultStatusRule(key);
   const statusLayerA = a ? { id: a.id, name: a.name, columns: colsA } : null;
@@ -192,7 +252,9 @@ export default function AssociateLayersDialog() {
     a &&
     b &&
     maxDistance !== null &&
+    unmatchedCost !== undefined &&
     (!s.aggregates || (aggregatesDistance !== null && aggregatesWeight !== null)) &&
+    !addressError &&
     !schemaA.isLoading &&
     !schemaB.isLoading &&
     chosen.length > 0 &&
@@ -216,7 +278,22 @@ export default function AssociateLayersDialog() {
                 status: statusRuleRequest(statusRuleOf(AGGREGATES_LABEL), s.statusNames),
               }
             : null,
+          address: s.address
+            ? {
+                columnA: addressA,
+                columnB: addressB,
+                maxDistance: addressDistance!,
+                weight: addressWeight!,
+                status: statusRuleRequest(statusRuleOf(ADDRESS_LABEL), s.statusNames),
+              }
+            : null,
+          unmatchedCost,
           includeUnmatchedB: s.includeUnmatchedB,
+          statusRenames: Object.fromEntries(
+            Object.entries(s.statusRenames).flatMap(([from, to]) =>
+              to.trim() && to.trim() !== from ? [[from, to.trim()]] : [],
+            ),
+          ),
           unmatchedStatus: {
             newPoints: statusRuleRequest(statusRuleOf(STATUS_NEW), s.statusNames),
             unidentified: statusRuleRequest(statusRuleOf(STATUS_UNIDENTIFIED), s.statusNames),
@@ -253,7 +330,7 @@ export default function AssociateLayersDialog() {
       open
       size="xl"
       title="Associar Camadas"
-      description="Liga cada ponto da camada A ao ponto mais próximo da camada B, 1 para 1: um ponto já associado não entra em outro par."
+      description="Liga os pontos da camada A aos da camada B, 1 para 1, com o menor custo total (distância + penalidades), olhando todos os pontos juntos."
       onClose={() => closeDialog('associate')}
       footer={
         <>
@@ -297,7 +374,13 @@ export default function AssociateLayersDialog() {
       }
     >
       <div className="space-y-5">
-        <div className="grid gap-4 sm:grid-cols-3">
+        <ToolTemplateBar
+          tool="association"
+          settings={s}
+          onApply={(saved) => setS(settingsFrom(saved, activeId))}
+        />
+
+        <div className="grid gap-4 sm:grid-cols-4">
           <div>
             <Label htmlFor="as-a" hint="1ª coluna do resultado">
               Camada A
@@ -354,6 +437,26 @@ export default function AssociateLayersDialog() {
               </p>
             )}
           </div>
+          <div>
+            <Label htmlFor="as-unmatched" hint="metros; vazio = associar o máximo">
+              Custo de ponto sem par
+            </Label>
+            <Input
+              id="as-unmatched"
+              type="number"
+              min={0}
+              max={MAX_PENALTY}
+              step="any"
+              placeholder="sem limite"
+              value={s.unmatchedCost}
+              onChange={(e) => patch({ unmatchedCost: e.target.value })}
+            />
+            {unmatchedCost === undefined && (
+              <p className="mt-1 text-xs text-red-600">
+                Informe um custo entre 0 e {fmtInt(MAX_PENALTY)} m, ou deixe vazio.
+              </p>
+            )}
+          </div>
         </div>
 
         <div className="space-y-1.5 text-sm text-slate-700">
@@ -378,7 +481,7 @@ export default function AssociateLayersDialog() {
         </div>
 
         <div className="space-y-2">
-          <Label hint="vence o par com a maior soma dos pesos atendidos; no empate, o mais próximo">
+          <Label hint="cada prioridade não atendida soma a penalidade dela à distância do par">
             Prioridades
           </Label>
           <div className="rounded-md border border-slate-200 p-2">
@@ -393,8 +496,9 @@ export default function AssociateLayersDialog() {
                 <span>
                   <span className="font-medium">Agregados de pontos</span>
                   <span className="block text-xs text-slate-500">
-                    Ponto único (sozinho na coordenada) com ponto único; vários pontos na mesma
-                    coordenada com vários pontos na mesma coordenada.
+                    Pela quantidade de pontos na mesma coordenada: único com único e grupo com grupo
+                    do mesmo tamanho (3 com 3). Grupos com 1 ponto de diferença (3 com 2 ou 4) pagam
+                    metade da penalidade; único com grupo ou diferença maior, a penalidade toda.
                   </span>
                 </span>
               </label>
@@ -416,14 +520,14 @@ export default function AssociateLayersDialog() {
                   </div>
                   <span className="text-xs text-slate-500">m</span>
                   <label htmlFor="as-aggw" className="ml-2 text-xs font-medium text-slate-600">
-                    Peso
+                    Penalidade (m)
                   </label>
                   <div className="w-20 shrink-0">
                     <Input
                       id="as-aggw"
                       type="number"
-                      min={MIN_WEIGHT}
-                      max={MAX_WEIGHT}
+                      min={0}
+                      max={MAX_PENALTY}
                       step="any"
                       value={s.aggregatesWeight}
                       onChange={(e) => patch({ aggregatesWeight: e.target.value })}
@@ -441,9 +545,98 @@ export default function AssociateLayersDialog() {
               <p className="mt-1 text-xs text-red-600">{WEIGHT_ERROR}</p>
             )}
           </div>
-          {s.criteria.length === 0 && !s.aggregates && (
+          <div className="rounded-md border border-slate-200 p-2">
+            <label className="flex min-w-0 items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={s.address}
+                onChange={(e) => patch({ address: e.target.checked })}
+                className="mt-0.5 accent-accent-600"
+              />
+              <span>
+                <span className="font-medium">Endereço parecido</span>
+                <span className="block text-xs text-slate-500">
+                  Atendida quando os endereços têm algum número igual ou alguma palavra parecida:
+                  com 1 ou 2 letras, a mesma palavra ("Rua A" com "A"); com 3 ou mais, também a
+                  abreviação ("Exe" ou "Rua Exem" com "Exemplo"). Ex.: "Rua Exemplo 123" com "123",
+                  "Ex 123" ou "exemplo"; muito diferentes, não. Endereço vazio ou SDO em um dos
+                  pontos não conta contra o par.
+                </span>
+              </span>
+            </label>
+            {s.address && (
+              <div className="mt-2 grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7rem_5rem]">
+                <div>
+                  <Label htmlFor="as-addr-a">Coluna em A</Label>
+                  <Select
+                    id="as-addr-a"
+                    value={addressA}
+                    onChange={(e) => {
+                      const columnA = e.target.value;
+                      patch({
+                        addressColumnA: columnA,
+                        ...(colsB.includes(columnA) ? { addressColumnB: columnA } : {}),
+                      });
+                    }}
+                  >
+                    {!addressA && <option value="">Escolha…</option>}
+                    {colsA.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <Label htmlFor="as-addr-b">Coluna em B</Label>
+                  <Select
+                    id="as-addr-b"
+                    value={addressB}
+                    onChange={(e) => patch({ addressColumnB: e.target.value })}
+                  >
+                    {!addressB && <option value="">Escolha…</option>}
+                    {colsB.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <Label htmlFor="as-addr-d" hint="m">
+                    Até
+                  </Label>
+                  <Input
+                    id="as-addr-d"
+                    type="number"
+                    min={0}
+                    max={MAX_DISTANCE}
+                    step="any"
+                    value={s.addressDistance}
+                    onChange={(e) => patch({ addressDistance: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="as-addr-w" hint="m">
+                    Penalidade
+                  </Label>
+                  <Input
+                    id="as-addr-w"
+                    type="number"
+                    min={0}
+                    max={MAX_PENALTY}
+                    step="any"
+                    value={s.addressWeight}
+                    onChange={(e) => patch({ addressWeight: e.target.value })}
+                  />
+                </div>
+              </div>
+            )}
+            {addressError && <p className="mt-1 text-xs text-red-600">{addressError}</p>}
+          </div>
+          {s.criteria.length === 0 && !s.aggregates && !s.address && (
             <p className="text-xs text-slate-500">
-              Sem prioridades: cada ponto fica com o ponto livre mais próximo.
+              Sem prioridades: a associação minimiza a soma das distâncias dos pares.
             </p>
           )}
           {s.criteria.map((c, i) => (
@@ -501,12 +694,14 @@ export default function AssociateLayersDialog() {
                   />
                 </div>
                 <div>
-                  <Label htmlFor={`as-cw-${i}`}>Peso</Label>
+                  <Label htmlFor={`as-cw-${i}`} hint="m">
+                    Penalidade
+                  </Label>
                   <Input
                     id={`as-cw-${i}`}
                     type="number"
-                    min={MIN_WEIGHT}
-                    max={MAX_WEIGHT}
+                    min={0}
+                    max={MAX_PENALTY}
                     step="any"
                     value={c.weight ?? '1'}
                     onChange={(e) => setCriterion(i, { weight: e.target.value })}
@@ -534,10 +729,12 @@ export default function AssociateLayersDialog() {
           <p className="text-xs text-slate-500">
             Uma prioridade é atendida quando os valores das duas colunas são iguais (sem diferenciar
             maiúsculas e acentos) e o par está a até a distância dela. Se essa distância for maior que a
-            máxima, pares que atendem a prioridade podem ser associados até ela. O peso diz quanto a
-            prioridade vale: com pesos 3, 1 e 1, atender só a primeira vale mais que atender as outras
-            duas. Como as prioridades não atendidas aparecem na coluna Status se configura em Status,
-            logo abaixo.
+            máxima, pares que atendem a prioridade podem ser associados até ela. O custo de um par é a
+            distância mais a penalidade de cada prioridade não atendida, e a associação escolhe o menor
+            custo total olhando todos os pontos juntos. Penalidade pequena (ex.: 10 m) desempata pela
+            proximidade; penalidade grande (ex.: 1000 m) só é quebrada quando não há outra opção, desde
+            que o custo de ponto sem par seja maior que metade dela. Como as prioridades não atendidas
+            aparecem na coluna Status se configura em Status, logo abaixo.
           </p>
         </div>
 
@@ -583,6 +780,13 @@ export default function AssociateLayersDialog() {
           )}
         </div>
 
+        <AssociationFixSection
+          request={request}
+          nameA={a?.name ?? 'A'}
+          nameB={b?.name ?? 'B'}
+          onOpenReview={() => closeDialog('associate')}
+        />
+
         {result && summary && (
           <div className="space-y-2">
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
@@ -621,12 +825,36 @@ export default function AssociateLayersDialog() {
                 <summary className="cursor-pointer px-3 py-1.5 font-medium text-slate-600">
                   Contagem por Status ({fmtInt(summary.byStatus.length)})
                 </summary>
-                <div className="scroll-thin max-h-48 overflow-y-auto border-t border-slate-100 px-3 py-1.5">
+                <div className="scroll-thin max-h-64 overflow-y-auto border-t border-slate-100 px-3 py-1.5">
                   <table className="w-full">
+                    <thead className="text-left text-[11px] text-slate-500">
+                      <tr>
+                        <th className="py-0.5 pr-3 font-medium">Status gerado</th>
+                        <th className="py-0.5 pr-3 font-medium">
+                          Nome no resultado (vazio = o gerado; salvo no template)
+                        </th>
+                        <th className="py-0.5 text-right font-medium">Quantidade</th>
+                      </tr>
+                    </thead>
                     <tbody>
                       {summary.byStatus.map((x) => (
-                        <tr key={x.status}>
-                          <td className="py-0.5 pr-3">{x.status}</td>
+                        <tr key={x.original}>
+                          <td className="py-0.5 pr-3">{x.original}</td>
+                          <td className="py-0.5 pr-3">
+                            <input
+                              aria-label={`Nome no resultado para ${x.original}`}
+                              value={s.statusRenames[x.original] ?? ''}
+                              placeholder={x.original}
+                              maxLength={200}
+                              onChange={(e) =>
+                                setS((cur) => ({
+                                  ...cur,
+                                  statusRenames: { ...cur.statusRenames, [x.original]: e.target.value },
+                                }))
+                              }
+                              className="h-6 w-full min-w-40 rounded border border-slate-300 bg-transparent px-1.5 text-xs focus:border-accent-500 focus:outline-none"
+                            />
+                          </td>
                           <td className="py-0.5 text-right tabular-nums">{fmtInt(x.count)}</td>
                         </tr>
                       ))}

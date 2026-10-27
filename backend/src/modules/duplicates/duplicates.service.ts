@@ -2,7 +2,13 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import ExcelJS from 'exceljs';
 import type { Response } from 'express';
 import { FilterDef, buildFilterConditions } from '../../common/filters';
-import { ColumnMeta, Params, normalizeValue as normalizeDb, qi, selectExpr } from '../../common/sql';
+import {
+  ColumnMeta,
+  Params,
+  normalizeValue as normalizeDb,
+  qi,
+  selectExpr,
+} from '../../common/sql';
 import { PrismaService } from '../../prisma/prisma.service';
 import { associate, normalizeValue } from '../association/association.logic';
 import { SourceContext, SourcesService } from '../tables/sources.service';
@@ -25,11 +31,18 @@ export interface DuplicatesRequest {
     sourceId: string;
     filters: FilterDef[];
     maxDistance: number;
+    /** Um associado e o outro sem par, mas alcançando o mesmo ponto da referência */
+    sharedMatched: number;
     bothMatched: number;
     oneMatched: number;
     noneMatched: number;
   } | null;
   density: { radius: number; minCount: number; weight: number } | null;
+  /**
+   * IDs dos dois pontos: em sequência (diferença até `maxGap` ou um começa com o outro) ou sem
+   * relação. `column` null = coluna de ID da camada. null = desligado.
+   */
+  ids: { column: string | null; maxGap: number; sequential: number; unrelated: number } | null;
   minScore: number;
   /** Também lista os outros pares a até o raio dos pontos suspeitos (abaixo da mínima) */
   includeNearby: boolean;
@@ -98,7 +111,8 @@ export interface DuplicatesResult {
 
 const PREVIEW_PAIRS = 500;
 
-const signed = (n: number) => `${n > 0 ? '+' : n < 0 ? '−' : ''}${String(Math.abs(n)).replace('.', ',')}`;
+const signed = (n: number) =>
+  `${n > 0 ? '+' : n < 0 ? '−' : ''}${String(Math.abs(n)).replace('.', ',')}`;
 
 export function ruleLabel(r: Pick<DuplicateRule, 'column' | 'mode' | 'scope'>) {
   return `${r.column} ${r.mode === 'equal' ? 'igual' : 'diferente'}${r.scope === 'sameCoord' ? ' na mesma coordenada' : ''}`;
@@ -116,10 +130,14 @@ export function describeParts(
       let label: string;
       if (p.key === 'same') label = 'mesma coordenada';
       else if (p.key.startsWith('rule:')) label = ruleLabel(req.rules[Number(p.key.slice(5))]);
-      else if (p.key === 'ref:both') label = `os dois associados a ${referenceName}`;
+      else if (p.key === 'ref:shared') label = `disputam o mesmo ponto de ${referenceName}`;
+      else if (p.key === 'ref:both') label = `cada um com o seu ponto em ${referenceName}`;
       else if (p.key === 'ref:one') label = `só um associado a ${referenceName}`;
+      else if (p.key === 'id:seq') label = 'IDs em sequência';
+      else if (p.key === 'id:unrelated') label = 'IDs sem relação';
       else if (p.key === 'ref:none') label = `nenhum associado a ${referenceName}`;
-      else label = `${nearbyUnmatched} sem associação a até ${String(req.density?.radius).replace('.', ',')} m`;
+      else
+        label = `${nearbyUnmatched} sem associação a até ${String(req.density?.radius).replace('.', ',')} m`;
       return `${label} (${signed(p.weight)})`;
     })
     .join('; ');
@@ -164,12 +182,18 @@ export class DuplicatesService {
       return;
     }
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
     const wb = new ExcelJS.Workbook();
     wb.creator = 'GeoAnalisys';
     wb.created = new Date();
     const sheet = wb.addWorksheet('Duplicidades', { views: [{ state: 'frozen', ySplit: 1 }] });
-    sheet.columns = t.headers.map((h) => ({ header: h, width: Math.min(Math.max(h.length + 2, 12), 60) }));
+    sheet.columns = t.headers.map((h) => ({
+      header: h,
+      width: Math.min(Math.max(h.length + 2, 12), 60),
+    }));
     sheet.getRow(1).font = { bold: true };
     sheet.addRows(t.rows.map((r) => r.map(plain)));
 
@@ -199,8 +223,9 @@ export class DuplicatesService {
       ...(ref
         ? [
             ['Associação à referência até (m)', ref.maxDistance],
-            ['Os dois associados', `peso ${signed(ref.bothMatched)}`],
-            ['Só um associado', `peso ${signed(ref.oneMatched)}`],
+            ['Disputam o mesmo ponto da referência', `peso ${signed(ref.sharedMatched)}`],
+            ['Cada um com o seu ponto na referência', `peso ${signed(ref.bothMatched)}`],
+            ['Só um associado (sem disputa)', `peso ${signed(ref.oneMatched)}`],
             ['Nenhum associado', `peso ${signed(ref.noneMatched)}`],
           ]
         : []),
@@ -210,14 +235,27 @@ export class DuplicatesService {
           ? `${req.density.minCount} ou mais a até ${num(req.density.radius)} m — peso ${signed(req.density.weight)}`
           : 'Desligado',
       ],
+      [
+        'IDs',
+        req.ids
+          ? `${req.ids.column ?? 'ID da camada'}: em sequência (diferença até ${num(req.ids.maxGap)} ou um começa com o outro) peso ${signed(req.ids.sequential)}; sem relação peso ${signed(req.ids.unrelated)}`
+          : 'Desligado',
+      ],
       ['Filtros da camada', req.layer.filters.length ? JSON.stringify(req.layer.filters) : '-'],
-      ...(ref ? [['Filtros da referência', ref.filters.length ? JSON.stringify(ref.filters) : '-']] : []),
+      ...(ref
+        ? [['Filtros da referência', ref.filters.length ? JSON.stringify(ref.filters) : '-']]
+        : []),
       [],
       [`Pontos de ${s.name}`, s.total],
       ['Sem coordenadas', s.withoutCoords],
-      ...(s.matchedReference !== null ? [[`Associados a ${s.referenceName}`, s.matchedReference]] : []),
+      ...(s.matchedReference !== null
+        ? [[`Associados a ${s.referenceName}`, s.matchedReference]]
+        : []),
       ['Pares suspeitos', s.pairs],
-      ['Outros pares dos pontos suspeitos (abaixo da mínima)', req.includeNearby ? s.nearbyPairs : 'Não listados'],
+      [
+        'Outros pares dos pontos suspeitos (abaixo da mínima)',
+        req.includeNearby ? s.nearbyPairs : 'Não listados',
+      ],
       ['Pares suspeitos na mesma coordenada', s.sameCoordPairs],
       ['Pontos envolvidos', s.points],
       ['Grupos', s.groups],
@@ -230,7 +268,9 @@ export class DuplicatesService {
   async run(req: DuplicatesRequest): Promise<DuplicatesResult> {
     const started = Date.now();
     if (req.reference && req.reference.sourceId === req.layer.sourceId) {
-      throw new BadRequestException('A camada de referência deve ser diferente da camada analisada');
+      throw new BadRequestException(
+        'A camada de referência deve ser diferente da camada analisada',
+      );
     }
     const [ctx, refCtx] = await Promise.all([
       this.sources.context(req.layer.sourceId),
@@ -241,17 +281,23 @@ export class DuplicatesService {
 
     // Cada coluna é lida uma vez, mesmo usada em mais de uma regra.
     const columns: ColumnMeta[] = [];
-    const ruleCol = req.rules.map((r) => {
-      const col = this.column(ctx, r.column);
+    const colIndex = (name: string) => {
+      const col = this.column(ctx, name);
       const i = columns.indexOf(col);
       return i >= 0 ? i : columns.push(col) - 1;
-    });
+    };
+    const ruleCol = req.rules.map((r) => colIndex(r.column));
+    // Regra de IDs numa coluna própria (ex.: id_ponto); sem coluna, o ID da camada.
+    const idCol = req.ids?.column ? colIndex(req.ids.column) : null;
 
     const [pts, refPts] = await Promise.all([
       this.load(ctx, req.layer.filters, columns),
       refCtx && req.reference ? this.load(refCtx, req.reference.filters, []) : null,
     ]);
-    for (const p of pts) p.values = ruleCol.map((c) => normalizeValue(p.raw[c]));
+    for (const p of pts) {
+      p.values = ruleCol.map((c) => normalizeValue(p.raw[c]));
+      p.idKey = normalizeValue(idCol === null ? p.id : p.raw[idCol]);
+    }
 
     let matchedReference: number | null = null;
     if (refPts && req.reference) {
@@ -261,6 +307,7 @@ export class DuplicatesService {
         const j = r.matchA[i];
         p.matched = j >= 0;
         p.ref = j >= 0 ? refPts[j].id : null;
+        p.refPos = j >= 0 ? { lat: refPts[j].lat!, lng: refPts[j].lng! } : null;
         if (j >= 0) matchedReference!++;
       });
     }
@@ -271,7 +318,16 @@ export class DuplicatesService {
         radius: req.radius,
         sameCoordWeight: req.sameCoordWeight,
         rules: req.rules,
-        reference: req.reference,
+        reference: req.reference
+          ? {
+              maxDistance: req.reference.maxDistance,
+              shared: req.reference.sharedMatched,
+              bothMatched: req.reference.bothMatched,
+              oneMatched: req.reference.oneMatched,
+              noneMatched: req.reference.noneMatched,
+            }
+          : null,
+        ids: req.ids,
         density: req.reference ? req.density : null,
         minScore: req.minScore,
         includeNearby: req.includeNearby,
@@ -287,7 +343,9 @@ export class DuplicatesService {
       lat: p.lat!,
       lng: p.lng!,
     });
-    const reasons = pairs.map((pr) => describeParts(pr.parts, req, referenceName, pr.nearbyUnmatched));
+    const reasons = pairs.map((pr) =>
+      describeParts(pr.parts, req, referenceName, pr.nearbyUnmatched),
+    );
     const involved = new Set<number>();
     for (const pr of pairs) if (!pr.belowMin) involved.add(pr.i).add(pr.j);
     const situation = (pr: DupPair) => (pr.belowMin ? 'Abaixo da mínima' : 'Suspeito');
@@ -395,7 +453,11 @@ export class DuplicatesService {
     const num = (n: number) => String(Math.round(n * 100) / 100).replace('.', ',');
     const rows = [...byIdx]
       .filter(([, e]) => e.list.some((x) => !x.pair.belowMin))
-      .sort(([a, x], [b, y]) => x.group - y.group || String(pts[a].id).localeCompare(String(pts[b].id), 'pt-BR', { numeric: true }))
+      .sort(
+        ([a, x], [b, y]) =>
+          x.group - y.group ||
+          String(pts[a].id).localeCompare(String(pts[b].id), 'pt-BR', { numeric: true }),
+      )
       .map(([idx, e]) => {
         const list = e.list.sort(
           (x, y) =>
@@ -432,12 +494,17 @@ export class DuplicatesService {
   private column(ctx: SourceContext, name: string) {
     const c = ctx.colMap.get(name);
     if (!c) throw new BadRequestException(`Coluna "${name}" não existe em ${ctx.source.name}`);
-    if (c.kind === 'geometry') throw new BadRequestException(`Coluna geométrica não suportada: ${name}`);
+    if (c.kind === 'geometry')
+      throw new BadRequestException(`Coluna geométrica não suportada: ${name}`);
     return c;
   }
 
   /** ID, coordenadas e valores das colunas pedidas, na ordem do ID. */
-  private async load(ctx: SourceContext, filters: FilterDef[], cols: ColumnMeta[]): Promise<LoadedPoint[]> {
+  private async load(
+    ctx: SourceContext,
+    filters: FilterDef[],
+    cols: ColumnMeta[],
+  ): Promise<LoadedPoint[]> {
     const params = new Params();
     const conds = buildFilterConditions(filters, ctx.colMap, params);
     const where = conds.length ? `WHERE ${conds.map((c) => `(${c})`).join(' AND ')}` : '';

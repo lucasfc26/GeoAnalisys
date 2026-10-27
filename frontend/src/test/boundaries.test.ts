@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   boundaryPolygons,
+  featureAt,
   featureLabels,
   readBoundaryFiles,
   type GeoCollection,
@@ -136,5 +137,56 @@ describe('limite nas ferramentas (Fora do limite)', () => {
 
   it('nome das feições pelo atributo que parece nome', () => {
     expect(featureLabels(fc)).toEqual(['Fortaleza', 'Caucaia', 'Feição 3']);
+  });
+});
+
+const ring = (x: number, y: number, w: number, h: number): number[][] => [
+  [x, y],
+  [x + w, y],
+  [x + w, y + h],
+  [x, y + h],
+  [x, y],
+];
+
+describe('consulta da feição sob o clique', () => {
+  const fc: GeoCollection = {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'Polygon',
+          coordinates: [ring(0, 0, 10, 10), ring(4, 4, 2, 2)],
+        },
+        properties: { nome: 'grande' },
+      },
+      {
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [ring(4, 4, 2, 2)] },
+        properties: { nome: 'miúdo' },
+      },
+      {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [20, 0],
+            [20, 1],
+          ],
+        },
+        properties: { nome: 'via' },
+      },
+    ],
+  };
+
+  it('escolhe o polígono mais específico e ignora o buraco do maior', () => {
+    expect(featureAt(fc, 1, 1, 0)).toBe(0);
+    expect(featureAt(fc, 5, 5, 0)).toBe(1);
+    expect(featureAt(fc, 30, 30, 0)).toBeNull();
+  });
+
+  it('aceita a linha quando o clique fica a poucos metros dela', () => {
+    expect(featureAt(fc, 20.0001, 0.5, 30)).toBe(2);
+    expect(featureAt(fc, 20.01, 0.5, 30)).toBeNull();
   });
 });

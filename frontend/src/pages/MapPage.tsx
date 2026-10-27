@@ -3,7 +3,8 @@ import type { Map as MlMap } from 'maplibre-gl';
 import { WifiOff } from 'lucide-react';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { RightPanel } from '@/components/layout/RightPanel';
-import { ToolPanel, useToolActions } from '@/components/layout/ToolPanel';
+import { UndoConfirmDialog } from '@/components/forms/UndoConfirmDialog';
+import { ToolPanel, endToolbarDrag, useToolActions } from '@/components/layout/ToolPanel';
 import { TopBar } from '@/components/layout/TopBar';
 import { toast } from '@/components/ui/Toaster';
 import { useActiveSource } from '@/hooks/useSourceData';
@@ -12,6 +13,7 @@ import { useShortcuts } from '@/hooks/useShortcuts';
 import { errorMessage } from '@/lib/api';
 import { MapContext } from '@/lib/mapContext';
 import type { ToolbarSide } from '@/lib/toolbar';
+import { barsOf, sideHasSlots, slotsFor } from '@/lib/toolbarLayout';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
 import { Loader2 } from 'lucide-react';
@@ -101,23 +103,43 @@ function Workspace() {
   useShortcuts(actions);
   const online = useOnline();
   const infoHidden = useAppStore((s) => s.viewHidden.info);
-  const side = useAppStore((s) => s.toolbarSide);
-  // Telas grandes: barra no lado escolhido; pequenas: sempre embaixo, sobre o mapa.
-  const bar = (at: ToolbarSide) =>
-    side === at && (
+  const layout = useAppStore((s) => s.toolbarLayout);
+  const dragging = useAppStore((s) => s.toolbarDragging);
+  useEffect(() => {
+    window.addEventListener('dragend', endToolbarDrag);
+    window.addEventListener('drop', endToolbarDrag);
+    return () => {
+      window.removeEventListener('dragend', endToolbarDrag);
+      window.removeEventListener('drop', endToolbarDrag);
+    };
+  }, []);
+  // Telas grandes: as barras de cada lado que tenha botões (a 1ª junto da borda). Lados vazios só
+  // aparecem durante o arraste; barras extras, sempre (para receber botões).
+  const bar = (at: ToolbarSide) => {
+    const n = barsOf(layout, at);
+    if (!dragging && !sideHasSlots(layout, at) && n === 1) return null;
+    const shown = Array.from({ length: n }, (_, i) => i).filter(
+      (i) => i > 0 || dragging || slotsFor(layout, at, 0).length > 0,
+    );
+    if (at === 'right' || at === 'bottom') shown.reverse();
+    return (
       <div
         className={clsx(
           'hidden min-h-0 min-w-0 lg:flex',
           at === 'top' || at === 'bottom' ? 'flex-col' : '',
         )}
       >
-        <ToolPanel side={at} />
+        {shown.map((i) => (
+          <ToolPanel key={i} side={at} bar={i} />
+        ))}
       </div>
     );
+  };
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <TopBar />
+      <UndoConfirmDialog />
       {!online && (
         <div className="flex items-center justify-center gap-2 bg-amber-500 px-3 py-1 text-xs font-medium text-white">
           <WifiOff className="size-3.5" /> Sem conexão — os dados podem estar desatualizados.

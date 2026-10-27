@@ -13,6 +13,7 @@ import {
   findLookup,
   indexLookup,
   mergeCounts,
+  sheetName,
 } from './comparison.logic';
 import {
   Cell,
@@ -239,22 +240,29 @@ export class ComparisonService {
     const wb = new ExcelJS.Workbook();
     wb.creator = 'GeoAnalisys';
     wb.created = new Date();
-    const sheet = wb.addWorksheet('Comparativo', { views: [{ state: 'frozen', ySplit: 1 }] });
-    sheet.columns = headers.map((h, k) => {
-      const c = k > 0 ? s.columns[k - 1] : null;
-      const d = c?.decimals;
-      return {
-        header: h,
-        width: c?.kind === 'label' ? 40 : Math.min(Math.max(h.length + 2, 12), 40),
-        ...(d !== null && d !== undefined
-          ? { style: { numFmt: d > 0 ? `#,##0.${'0'.repeat(d)}` : '#,##0' } }
-          : {}),
-      };
-    });
-    sheet.getRow(1).font = { bold: true };
-    for (const b of body) {
-      const row = sheet.addRow(b.cells);
-      if (b.total) row.font = { bold: true };
+    const colHeaders = s.columns.map((c) => c.title);
+    const usedSheets = new Set<string>(['parâmetros']);
+    for (const x of sections) {
+      const sheet = wb.addWorksheet(sheetName(x.title, usedSheets), {
+        views: [{ state: 'frozen', ySplit: 1 }],
+      });
+      sheet.columns = colHeaders.map((h, k) => {
+        const c = s.columns[k];
+        const d = c?.decimals;
+        return {
+          header: h,
+          width: c?.kind === 'label' ? 40 : Math.min(Math.max(h.length + 2, 12), 40),
+          ...(d !== null && d !== undefined
+            ? { style: { numFmt: d > 0 ? `#,##0.${'0'.repeat(d)}` : '#,##0' } }
+            : {}),
+        };
+      });
+      sheet.getRow(1).font = { bold: true };
+      for (const r of x.rows) sheet.addRow(r.cells);
+      if (x.rows.length > 1) {
+        const row = sheet.addRow(x.totals);
+        row.font = { bold: true };
+      }
     }
 
     const info = wb.addWorksheet('Parâmetros');
@@ -308,6 +316,63 @@ export class ComparisonService {
     res.end();
   }
 
+  /**
+   * IDs dos pontos de cada camada que caem num grupo sem correspondência na tabela de apoio
+   * (as mesmas condições e o agrupamento do bloco).
+   */
+  async unmatchedPoints(req: ComparisonRequest): Promise<{
+    layers: { sourceId: string; label: string; column: string; ids: string[] }[];
+  }> {
+    const blocks = req.blocks.filter((b) => b.useLookup);
+    if (!req.lookup || !blocks.length) return { layers: [] };
+    const ctxs = await Promise.all(req.layers.map((l) => this.sources.context(l.sourceId)));
+    const labels = req.layers.map((l, i) => l.label?.trim() || ctxs[i].source.name);
+    const lookup = await this.loadLookup(req, []);
+    const ids = req.layers.map(() => new Set<string>());
+    for (const block of blocks) {
+      const keyPos = req.lookup.keys.map((k) => {
+        const pos = block.groupBy.indexOf(k.column);
+        if (pos < 0) {
+          throw new BadRequestException(
+            `O bloco "${block.title}" usa a tabela de apoio, mas não agrupa por "${k.column}"`,
+          );
+        }
+        return pos;
+      });
+      const perLayer = await Promise.all(
+        req.layers.map((l, i) => this.count(ctxs[i], labels[i], l.filters, block)),
+      );
+      for (let i = 0; i < req.layers.length; i++) {
+        const seen = new Set<string>();
+        const keys = perLayer[i]
+          .filter((r) => {
+            if (findLookup(lookup, keyPos.map((p) => r.keys[p]), req.ignoreCase)) return false;
+            const sig = r.keys.map((k) => k ?? '\u0000').join('\u0001');
+            if (seen.has(sig)) return false;
+            seen.add(sig);
+            return true;
+          })
+          .map((r) => r.keys);
+        for (const id of await this.idsForKeys(ctxs[i], labels[i], req.layers[i].filters, block, keys)) {
+          ids[i].add(id);
+        }
+      }
+    }
+    const MAX_IDS = 200_000;
+    return {
+      layers: req.layers.flatMap((l, i) => {
+        if (ids[i].size > MAX_IDS) {
+          throw new BadRequestException(
+            `${labels[i]} tem ${ids[i].size} pontos sem correspondência; o limite da lista é ${MAX_IDS}`,
+          );
+        }
+        return ids[i].size
+          ? [{ sourceId: l.sourceId, label: labels[i], column: ctxs[i].idCol.name, ids: [...ids[i]] }]
+          : [];
+      }),
+    };
+  }
+
   private column(ctx: SourceContext, label: string, name: string): ColumnMeta {
     const c = ctx.colMap.get(name);
     if (!c) throw new BadRequestException(`Coluna "${name}" não existe em ${label}`);
@@ -349,6 +414,50 @@ export class ComparisonService {
         n: Number(r.n),
       }))
       .filter((r) => groups.length === 0 || r.n > 0);
+  }
+
+  /** Registros da camada cujo grupo está em `keys`, com os filtros e as condições do bloco. */
+  private async idsForKeys(
+    ctx: SourceContext,
+    label: string,
+    filters: FilterDef[],
+    block: ComparisonBlock,
+    keys: (string | null)[][],
+  ): Promise<string[]> {
+    if (!keys.length || !block.groupBy.length) return [];
+    const groups = block.groupBy.map((g) => this.column(ctx, label, g));
+    const out: string[] = [];
+    const chunk = 200;
+    for (let i = 0; i < keys.length; i += chunk) {
+      const part = keys.slice(i, i + chunk);
+      const params = new Params();
+      let conds: string[];
+      try {
+        conds = buildFilterConditions([...filters, ...block.conditions], ctx.colMap, params);
+      } catch (err) {
+        if (err instanceof BadRequestException) {
+          throw new BadRequestException(`${label}, bloco "${block.title}": ${err.message}`);
+        }
+        throw err;
+      }
+      const ors = part.map(
+        (tuple) =>
+          `(${groups
+            .map((g, k) =>
+              tuple[k] === null
+                ? `${qi(g.name)}::text IS NULL`
+                : `${qi(g.name)}::text = ${params.add(tuple[k])}`,
+            )
+            .join(' AND ')})`,
+      );
+      const where = [...conds.map((c) => `(${c})`), `(${ors.join(' OR ')})`].join(' AND ');
+      const raw = await this.prisma.$queryRawUnsafe<{ id: string | null }[]>(
+        `SELECT DISTINCT ${qi(ctx.idCol.name)}::text AS id FROM ${ctx.table} WHERE ${where}`,
+        ...params.values,
+      );
+      for (const r of raw) if (r.id) out.push(r.id);
+    }
+    return out;
   }
 
   private async lookupColumns(lk: ComparisonLookup): Promise<string[]> {

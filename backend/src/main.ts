@@ -49,6 +49,9 @@ async function bootstrap() {
   // HOST=127.0.0.1 (programa desktop): aceita conexões só da própria máquina.
   if (process.env.HOST) await app.listen(port, process.env.HOST);
   else await app.listen(port);
+  // Upload de arquivos grandes (importar camada): o padrão do Node encerra pedidos após 5 min.
+  const server = app.getHttpServer() as { requestTimeout?: number };
+  server.requestTimeout = 60 * 60_000;
   Logger.log(
     `API em http://localhost:${port}/api  |  Swagger em http://localhost:${port}/api/docs`,
     'Bootstrap',

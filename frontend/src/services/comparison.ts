@@ -69,4 +69,10 @@ export const comparisonService = {
     triggerDownload(href, filenameFrom(res, `comparativo.${format}`));
     setTimeout(() => URL.revokeObjectURL(href), 10_000);
   },
+  /** Pontos das camadas que estão num grupo sem correspondência na tabela de apoio. */
+  unmatched: (req: ComparisonRequest) =>
+    api.post<{ layers: { sourceId: string; label: string; column: string; ids: string[] }[] }>(
+      '/comparison/unmatched',
+      req,
+    ),
 };

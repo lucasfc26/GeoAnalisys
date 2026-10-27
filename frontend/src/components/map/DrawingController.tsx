@@ -1,13 +1,14 @@
 import type { MapMouseEvent } from 'maplibre-gl';
 import { useEffect, useRef, useState } from 'react';
-import { eventLatLng, isAdditive, useMap } from '@/lib/mapContext';
+import { eventLatLng, useMap } from '@/lib/mapContext';
+import { selectionModeOf, type SelectionMode } from '@/lib/selectionMode';
 import { lineFeature, polygonFeature, toolSource } from '@/lib/toolLayers';
 import type { LatLng, Tool } from '@/types';
 
 interface Props {
   tool: Tool;
   hasSelection: boolean;
-  onPolygon: (polygon: LatLng[], additive: boolean) => void;
+  onPolygon: (polygon: LatLng[], mode: SelectionMode) => void;
   onMapClick: (pos: LatLng) => void;
 }
 
@@ -61,10 +62,8 @@ export function DrawingController({ tool, hasSelection, onPolygon, onMapClick }:
   useEffect(() => {
     if (!map || tool !== 'rectangle') return;
     let start: LatLng | null = null;
-    let additive = false;
     const down = (e: MapMouseEvent) => {
       if ((e.originalEvent as MouseEvent).button !== 0) return;
-      additive = isAdditive(e);
       start = eventLatLng(e);
       shape.current?.clear();
     };
@@ -81,8 +80,9 @@ export function DrawingController({ tool, hasSelection, onPolygon, onMapClick }:
         return;
       }
       // A seleção fica; a marcação do retângulo some ao soltar o botão.
+      // O modificador vale ao soltar, para Shift/Ctrl apertados durante o arraste.
       shape.current?.clear();
-      handlers.current.onPolygon(rectangle(a, end), additive);
+      handlers.current.onPolygon(rectangle(a, end), selectionModeOf(e.originalEvent));
     };
     map.on('mousedown', down);
     map.on('mousemove', move);
@@ -105,8 +105,8 @@ export function DrawingController({ tool, hasSelection, onPolygon, onMapClick }:
       },
     ]);
     const path: LatLng[] = [];
-    let additive = false;
-    const finish = () => {
+    let mode: SelectionMode = 'replace';
+    const finish = (e?: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }) => {
       // Remove vértices duplicados (o duplo clique gera dois cliques).
       const pts = path.filter((p, i) => i === 0 || !same(p, path[i - 1]));
       // Com menos de 3 vértices o polígono continua em edição (não descarta os cliques).
@@ -115,14 +115,13 @@ export function DrawingController({ tool, hasSelection, onPolygon, onMapClick }:
       preview.clear();
       setVertexCount(0);
       // A seleção fica; a marcação do polígono some ao concluir.
+      // Shift/Ctrl valem ao concluir (duplo clique, Enter ou o botão).
       shape.current?.clear();
-      handlers.current.onPolygon(pts, additive);
+      handlers.current.onPolygon(pts, e ? selectionModeOf(e) : mode);
     };
     const click = (e: MapMouseEvent) => {
-      if (path.length === 0) {
-        shape.current?.clear();
-        additive = isAdditive(e);
-      }
+      if (path.length === 0) shape.current?.clear();
+      mode = selectionModeOf(e.originalEvent);
       path.push(eventLatLng(e));
       preview.set([lineFeature(path)]);
       setVertexCount(path.length);
@@ -130,24 +129,31 @@ export function DrawingController({ tool, hasSelection, onPolygon, onMapClick }:
     const move = (e: MapMouseEvent) => {
       if (path.length) preview.set([lineFeature([...path, eventLatLng(e), path[0]])]);
     };
+    const syncMode = (e: KeyboardEvent) => {
+      mode = selectionModeOf(e);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Enter') finish();
+      syncMode(e);
+      if (e.key === 'Enter') finish(e);
       if (e.key === 'Escape') {
         path.length = 0;
         preview.clear();
         setVertexCount(0);
       }
     };
+    const onDbl = (e: MapMouseEvent) => finish(e.originalEvent);
     map.on('click', click);
     map.on('mousemove', move);
-    map.on('dblclick', finish);
+    map.on('dblclick', onDbl);
     window.addEventListener('keydown', onKey);
-    finishRef.current = finish;
+    window.addEventListener('keyup', syncMode);
+    finishRef.current = () => finish();
     return () => {
       map.off('click', click);
       map.off('mousemove', move);
-      map.off('dblclick', finish);
+      map.off('dblclick', onDbl);
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', syncMode);
       preview.remove();
       setVertexCount(0);
     };

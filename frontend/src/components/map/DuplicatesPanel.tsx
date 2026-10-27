@@ -23,6 +23,7 @@ import { Button } from '../ui/Button';
 import { FloatingPanel } from '../ui/FloatingPanel';
 import { PreviewFrame } from './PreviewFrame';
 import { PreviewSettings } from './PreviewSettings';
+import { findElementById } from '@/lib/detachedWindows';
 
 const num = (n: number) => n.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
 /** Motivo sugerido ao excluir um registro pela lista (pode ser reescrito) */
@@ -114,7 +115,7 @@ function Panel({
     setCurrent(k);
     setShown([pairs[k].a, pairs[k].b]);
     selectDuplicatePoints(sourceId, [pairs[k].a, pairs[k].b]);
-    document.getElementById(`dup-pair-${k}`)?.scrollIntoView({ block: 'nearest' });
+    findElementById(`dup-pair-${k}`)?.scrollIntoView({ block: 'nearest' });
   };
   const showGroup = (g: Group) => {
     setCurrent(null);
@@ -128,7 +129,7 @@ function Panel({
     : frameIds.length
       ? frameIds.map((id, i) => {
           const rec = byId.get(id);
-          const link = rec ? previewUrl(previewCfg, rec.data) : null;
+          const link = rec ? previewUrl(previewCfg, rec.data, rec) : null;
           return (
             <PreviewFrame
               key={i}
@@ -136,6 +137,7 @@ function Panel({
               placement={framePlacement(i)}
               title={`Fotos · ${id}${frameIds.length > 1 ? ` (${i + 1}/${frameIds.length})` : ''}`}
               url={link && 'url' in link ? link.url : null}
+              externalUrl={link && 'url' in link ? link.external : undefined}
               message={
                 records.isError
                   ? 'Erro ao carregar o ponto.'

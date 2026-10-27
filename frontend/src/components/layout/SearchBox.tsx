@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQueries } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { Loader2, LocateFixed, MapPin, Search, X } from 'lucide-react';
 import proj4 from 'proj4';
@@ -7,6 +7,7 @@ import { useDebounce } from '@/hooks/useDebounce';
 import { useActiveSource, useCrsList } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
 import { parseCoordinate } from '@/lib/coords';
+import { layerName } from '@/lib/layers';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
 import type { SearchResult } from '@/types';
@@ -14,8 +15,12 @@ import { toast } from '../ui/Toaster';
 
 const fmtCoord = (n: number) => n.toFixed(7).replace(/\.?0+$/, '');
 
+/** Resultado com a camada de origem (a busca percorre todas as camadas do mapa). */
+type LayerResult = SearchResult & { layerId: string; layerLabel: string };
+
 /**
- * Busca textual: centraliza o mapa, destaca o ponto e abre o painel. Uma coordenada digitada
+ * Busca textual em todas as camadas do mapa (a ativa primeiro): centraliza o mapa, torna ativa a
+ * camada do resultado, destaca o ponto e abre o painel. Uma coordenada digitada
  * (lat/lng ou UTM X/Y) leva o mapa até ela.
  */
 export function SearchBox() {
@@ -27,15 +32,45 @@ export function SearchBox() {
   const [open, setOpen] = useState(false);
   const debounced = useDebounce(q.trim(), 350);
   const boxRef = useRef<HTMLDivElement>(null);
-  const { source } = useActiveSource();
+  const { source, sources } = useActiveSource();
   const crs = useCrsList();
+  const layers = useAppStore((s) => s.layers);
+  const setSource = useAppStore((s) => s.setSource);
 
-  const results = useQuery({
-    queryKey: ['points', sourceId, 'search', debounced],
-    queryFn: ({ signal }) => pointsService.search(sourceId!, debounced, signal),
-    enabled: !!sourceId && debounced.length >= 2,
-    staleTime: 30_000,
+  // Camadas pesquisadas: a ativa primeiro, depois na ordem do mapa.
+  const layerIds = useMemo(() => {
+    const ids = layers.map((l) => l.sourceId);
+    if (sourceId && !ids.includes(sourceId)) ids.unshift(sourceId);
+    return sourceId ? [sourceId, ...ids.filter((id) => id !== sourceId)] : ids;
+  }, [layers, sourceId]);
+  const queries = useQueries({
+    queries: layerIds.map((id) => ({
+      queryKey: ['points', id, 'search', debounced],
+      queryFn: ({ signal }: { signal: AbortSignal }) => pointsService.search(id, debounced, signal),
+      enabled: debounced.length >= 2,
+      staleTime: 30_000,
+    })),
   });
+  const multiLayer = layerIds.length > 1;
+  const isFetching = queries.some((q) => q.isFetching);
+  const loaded = queries.filter((q) => q.data);
+  const failed = queries.find((q) => q.isError);
+  const results = {
+    isFetching,
+    // Com alguma camada respondendo, mostra o que veio; o erro só aparece se nenhuma respondeu.
+    isError: !!failed && !loaded.length,
+    error: failed?.error,
+    data: loaded.length
+      ? queries.flatMap((q, i): LayerResult[] => {
+          const id = layerIds[i];
+          const label = layerName(
+            layers.find((l) => l.sourceId === id),
+            sources.data?.find((s) => s.id === id) ?? undefined,
+          );
+          return (q.data ?? []).map((r) => ({ ...r, layerId: id, layerLabel: label }));
+        })
+      : undefined,
+  };
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -76,9 +111,10 @@ export function SearchBox() {
   };
 
   // Seleciona só o registro pesquisado, mesmo que outros estejam na mesma coordenada.
-  const pick = (r: SearchResult) => {
+  const pick = (r: LayerResult) => {
     setOpen(false);
-    if (!sourceId || r.lat === null || r.lng === null) return;
+    if (r.lat === null || r.lng === null) return;
+    if (r.layerId !== useAppStore.getState().sourceId) setSource(r.layerId);
     focusMap({ center: { lat: r.lat, lng: r.lng }, zoom: 19 });
     setSelection([{ key: r.key, x: r.x, y: r.y, lat: r.lat, lng: r.lng, ids: [r.id] }]);
     openRecord(r.key, r.id);
@@ -89,7 +125,7 @@ export function SearchBox() {
       <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-slate-400" />
       <input
         value={q}
-        disabled={!sourceId}
+        disabled={!layerIds.length}
         onChange={(e) => {
           setQ(e.target.value);
           setOpen(true);
@@ -103,7 +139,7 @@ export function SearchBox() {
           if (e.key === 'Escape') setOpen(false);
         }}
         placeholder={
-          sourceId
+          layerIds.length
             ? 'Pesquisar ID, nome, endereço ou coordenada…'
             : 'Configure uma fonte para pesquisar'
         }
@@ -140,7 +176,7 @@ export function SearchBox() {
           ) : (
             <ul className="scroll-thin max-h-80 overflow-y-auto">
               {results.data.map((r) => (
-                <li key={r.id}>
+                <li key={`${r.layerId}:${r.id}`}>
                   <button
                     type="button"
                     onClick={() => pick(r)}
@@ -154,6 +190,11 @@ export function SearchBox() {
                       {r.match && r.match.column !== undefined && (
                         <span className="block truncate text-xs text-slate-500">
                           {r.match.column}: {r.match.value}
+                        </span>
+                      )}
+                      {multiLayer && (
+                        <span className="block truncate text-[11px] text-slate-400">
+                          {r.layerLabel}
                         </span>
                       )}
                     </span>

@@ -12,8 +12,9 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import type { ImportType } from '../layers/import.parse';
 import { LayersService } from '../layers/layers.service';
+import { PointsService } from '../points/points.service';
 import { SourceContext, SourcesService } from '../tables/sources.service';
-import { AssocPoint, aggregateKinds, associate, normalizeValue } from './association.logic';
+import { AssocPoint, aggregateCounts, associate, normalizeValue } from './association.logic';
 
 export interface AssociationLayer {
   sourceId: string;
@@ -34,7 +35,15 @@ export interface AssociationCriterion {
   columnA: string;
   columnB: string;
   maxDistance: number;
-  /** Peso da prioridade (padrão 1): vence o par com a maior soma dos pesos atendidos */
+  /** Penalidade em metros (padrão 1) somada ao custo do par quando a prioridade não é atendida */
+  weight?: number;
+  status?: StatusRule;
+}
+
+export interface AddressCriterion {
+  columnA: string;
+  columnB: string;
+  maxDistance: number;
   weight?: number;
   status?: StatusRule;
 }
@@ -49,10 +58,19 @@ export interface AssociationRequest {
    * na mesma coordenada, até `maxDistance`. Ausente = desligada.
    */
   aggregates: { maxDistance: number; weight?: number; status?: StatusRule } | null;
+  /**
+   * Prioridade de endereço parecido (ex.: "Rua Exemplo 123" × "Ex 123"), até `maxDistance`. Endereço
+   * vazio ou SDO em um dos pontos não conta contra o par. Ausente/null = desligada.
+   */
+  address?: AddressCriterion | null;
+  /** Custo em metros de deixar um ponto sem par (ausente/null = associar o máximo possível) */
+  unmatchedCost?: number | null;
   /** Status dos pontos sem par: de A (Ponto Novo; atributo de A) e de B (Não Identificado; de B) */
   unmatchedStatus?: { newPoints?: StatusRule; unidentified?: StatusRule };
   /** Também lista os pontos de B sem associação (0 na primeira coluna) */
   includeUnmatchedB: boolean;
+  /** Nome escolhido para cada Status gerado (ex.: "Ponto Normal" → "OK"); ausente = o gerado */
+  statusRenames?: Record<string, string>;
   /** Colunas do resultado, na ordem (chaves de `outputFields`); ausente = padrão */
   columns?: string[];
 }
@@ -61,6 +79,9 @@ interface LoadedPoint extends AssocPoint {
   id: unknown;
   /** Coordenada original (X|Y) para achar pontos na mesma posição */
   coordKey: string | null;
+  /** Coordenada original no CRS da camada */
+  x: number | null;
+  y: number | null;
   /** Valores das colunas de atributo pedidas, na ordem de `attrs` */
   attrs: unknown[];
   /** Valores dos atributos usados no Status (`StatusPlan.rules[k].attr.index`) */
@@ -91,7 +112,7 @@ export interface AssociationTable {
     /** Pares com alguma prioridade não atendida (Divergência) */
     divergent: number;
     /** Linhas por Status, da mais frequente para a menos */
-    byStatus: { status: string; count: number }[];
+    byStatus: { status: string; original: string; count: number }[];
     averageDistance: number | null;
     durationMs: number;
   };
@@ -106,6 +127,7 @@ export const KEY_SCORE = '@score';
 export const KEY_WEIGHT = '@weight';
 export const KEY_STATUS = '@status';
 export const AGGREGATES_LABEL = 'agregados';
+export const ADDRESS_LABEL = 'endereço';
 /** Chave da coluna "Prioridade: <rótulo>" */
 export const critKey = (label: string) => `@crit:${label}`;
 /** Chave de um atributo da camada A ou B (`@lat`/`@lng` = latitude/longitude calculadas) */
@@ -121,7 +143,7 @@ export function criterionLabel(c: AssociationCriterion) {
 interface PairInfo {
   distance: number;
   met: boolean[];
-  /** Soma dos pesos das prioridades atendidas */
+  /** Soma das penalidades (m) das prioridades não atendidas */
   score: number;
 }
 
@@ -240,7 +262,7 @@ interface LayerInfo {
 const typeOfKind = (kind: ColumnMeta['kind'] | undefined): ImportType =>
   kind === 'integer' ? 'integer' : kind === 'number' ? 'number' : 'text';
 
-/** Chaves padrão: IDs, distância, prioridades atendidas, pontuação, status e uma coluna por prioridade. */
+/** Chaves padrão: IDs, distância, prioridades atendidas, penalidade, status e uma coluna por prioridade. */
 export function defaultColumns(critLabels: string[]) {
   return [
     KEY_ID_A,
@@ -307,7 +329,7 @@ export function outputFields(
     if (key === KEY_WEIGHT) {
       return {
         key,
-        header: 'Pontuação',
+        header: 'Penalidade (m)',
         type: 'number',
         attr: null,
         value: (_p, _q, pair) => (pair ? pair.score : null),
@@ -354,6 +376,48 @@ export function outputFields(
 }
 
 const PREVIEW_ROWS = 200;
+/** Pares mandados para a lista de revisão (os mais suspeitos) */
+const MAX_REVIEW = 5000;
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+export interface ReviewOptions {
+  /** Par distante: acima desta distância em metros (null = não procura) */
+  farDistance: number | null;
+  /** Par dúbio: margem abaixo destes metros (null = não procura) */
+  maxMargin: number | null;
+}
+
+export interface ReviewPoint {
+  id: string;
+  x: number;
+  y: number;
+  lat: number;
+  lng: number;
+}
+
+export interface ReviewPair {
+  a: ReviewPoint;
+  b: ReviewPoint;
+  distance: number;
+  /** Distância + penalidades */
+  cost: number;
+  /** Segundo melhor candidato − custo do par (null = sem outro candidato) */
+  margin: number | null;
+  far: boolean;
+  dubious: boolean;
+  /** Prioridades não atendidas */
+  divergent: string[];
+}
+
+export interface AssociationReview {
+  nameA: string;
+  nameB: string;
+  /** Pares encontrados (a lista traz até MAX_REVIEW) */
+  total: number;
+  far: number;
+  dubious: number;
+  pairs: ReviewPair[];
+}
 
 /** Onde gravar o resultado: nova camada em GeoAnalisysTemp ou substituir uma de lá. */
 export type AssociationLayerTarget = { convertCoordinates?: boolean } & (
@@ -368,6 +432,7 @@ export class AssociationService {
     private readonly prisma: PrismaService,
     private readonly sources: SourcesService,
     private readonly layers: LayersService,
+    private readonly points: PointsService,
   ) {}
 
   /** Resumo e primeiras linhas do resultado. */
@@ -467,16 +532,24 @@ export class AssociationService {
       ['Distância máxima (m)', req.maxDistance],
       ...req.criteria.map((c, k) => [
         `Prioridade ${k + 1}`,
-        `${criterionLabel(c)} — até ${num(c.maxDistance)} m, peso ${num(c.weight ?? 1)}`,
+        `${criterionLabel(c)} — até ${num(c.maxDistance)} m, penalidade ${num(c.weight ?? 1)} m`,
       ]),
+      [
+        'Prioridade de endereço parecido',
+        req.address
+          ? `${criterionLabel(req.address)} — algum número igual ou palavra igual/abreviada (vazio ou SDO não conta), até ${num(req.address.maxDistance)} m, penalidade ${num(req.address.weight ?? 1)} m`
+          : 'Desligada',
+      ],
       [
         'Prioridade de agregados',
         req.aggregates
-          ? `único com único, vários na mesma coordenada com vários — até ${num(req.aggregates.maxDistance)} m, peso ${num(req.aggregates.weight ?? 1)}`
+          ? `mesma quantidade de pontos na coordenada (único com único, 3 com 3); 1 de diferença entre agregados paga metade — até ${num(req.aggregates.maxDistance)} m, penalidade ${num(req.aggregates.weight ?? 1)} m`
           : 'Desligada',
       ],
+      ['Custo de ponto sem par (m)', req.unmatchedCost ?? 'sem limite (associa o máximo possível)'],
       ...[
         ...req.criteria.map((c) => ({ label: criterionLabel(c), rule: c.status })),
+        ...(req.address ? [{ label: ADDRESS_LABEL, rule: req.address.status }] : []),
         ...(req.aggregates ? [{ label: AGGREGATES_LABEL, rule: req.aggregates.status }] : []),
         { label: `Ponto Novo coletado em ${s.nameA}`, rule: req.unmatchedStatus?.newPoints },
         { label: `Não Identificado em ${s.nameA}`, rule: req.unmatchedStatus?.unidentified },
@@ -506,6 +579,90 @@ export class AssociationService {
   }
 
   async run(req: AssociationRequest): Promise<AssociationTable> {
+    return (await this.compute(req)).table;
+  }
+
+  /** Pares distantes ou dúbios, para revisar no mapa (os mais suspeitos primeiro). */
+  async review(req: AssociationRequest, opts: ReviewOptions): Promise<AssociationReview> {
+    const { table, a, b, r, labels } = await this.compute(req);
+    const point = (p: LoadedPoint): ReviewPoint => ({
+      id: String(p.id),
+      x: p.x!,
+      y: p.y!,
+      lat: p.lat!,
+      lng: p.lng!,
+    });
+    const pairs: ReviewPair[] = [];
+    let far = 0;
+    let dubious = 0;
+    a.forEach((p, i) => {
+      const j = r.matchA[i];
+      if (j < 0) return;
+      const isFar = opts.farDistance !== null && r.distance[i] > opts.farDistance;
+      const isDubious = opts.maxMargin !== null && r.margin[i] < opts.maxMargin;
+      if (!isFar && !isDubious) return;
+      if (isFar) far++;
+      if (isDubious) dubious++;
+      pairs.push({
+        a: point(p),
+        b: point(b[j]),
+        distance: round2(r.distance[i]),
+        cost: round2(r.cost[i]),
+        margin: Number.isFinite(r.margin[i]) ? round2(r.margin[i]) : null,
+        far: isFar,
+        dubious: isDubious,
+        divergent: labels.filter((_, k) => ((r.metMask[i] >> k) & 1) === 0),
+      });
+    });
+    // Distantes primeiro (da maior distância para a menor), depois os dúbios (menor margem primeiro).
+    pairs.sort(
+      (x, y) =>
+        Number(y.far) - Number(x.far) ||
+        (x.far ? y.distance - x.distance : (x.margin ?? Infinity) - (y.margin ?? Infinity)),
+    );
+    return {
+      nameA: table.summary.nameA,
+      nameB: table.summary.nameB,
+      total: pairs.length,
+      far,
+      dubious,
+      pairs: pairs.slice(0, MAX_REVIEW),
+    };
+  }
+
+  /**
+   * Corrige as coordenadas: cada ponto da camada `from` cujo par está a mais de `minDistance` m
+   * recebe a coordenada do ponto associado da outra camada. `dryRun` só conta.
+   */
+  async fixCoordinates(
+    req: AssociationRequest,
+    from: 'A' | 'B',
+    minDistance: number,
+    dryRun: boolean,
+    userId: string,
+  ) {
+    const { table, a, b, r } = await this.compute(req);
+    const moves: { id: string; targetId: string }[] = [];
+    a.forEach((p, i) => {
+      const j = r.matchA[i];
+      if (j < 0 || !(r.distance[i] > minDistance)) return;
+      const [src, dst] = from === 'A' ? [p, b[j]] : [b[j], p];
+      moves.push({ id: String(src.id), targetId: String(dst.id) });
+    });
+    const [nameFrom, nameTo] =
+      from === 'A'
+        ? [table.summary.nameA, table.summary.nameB]
+        : [table.summary.nameB, table.summary.nameA];
+    if (dryRun || !moves.length) {
+      return { count: moves.length, moved: 0, nameFrom, nameTo, groups: [] };
+    }
+    const [sourceId, targetId] =
+      from === 'A' ? [req.a.sourceId, req.b.sourceId] : [req.b.sourceId, req.a.sourceId];
+    const res = await this.points.snapTo(sourceId, targetId, moves, userId);
+    return { count: moves.length, moved: res.count, nameFrom, nameTo, groups: res.groups };
+  }
+
+  private async compute(req: AssociationRequest) {
     const started = Date.now();
     if (req.a.sourceId === req.b.sourceId) {
       throw new BadRequestException('Escolha duas camadas diferentes');
@@ -517,17 +674,33 @@ export class AssociationService {
     const nameA = ctxA.source.name;
     const nameB = ctxB.source.name;
 
-    // Agregados entram como mais uma prioridade, com o tipo do ponto como valor.
-    const criteria = req.criteria.map((c) => ({
-      label: criterionLabel(c),
-      maxDistance: c.maxDistance,
-      weight: c.weight ?? 1,
-    }));
+    // Endereço e agregados entram como mais prioridades (nesta ordem, depois das escolhidas); nos
+    // agregados, a quantidade de pontos na coordenada é o valor.
+    const criteria: {
+      label: string;
+      maxDistance: number;
+      weight: number;
+      kind?: 'address' | 'count';
+    }[] =
+      req.criteria.map((c) => ({
+        label: criterionLabel(c),
+        maxDistance: c.maxDistance,
+        weight: c.weight ?? 1,
+      }));
+    if (req.address) {
+      criteria.push({
+        label: ADDRESS_LABEL,
+        maxDistance: req.address.maxDistance,
+        weight: req.address.weight ?? 1,
+        kind: 'address',
+      });
+    }
     if (req.aggregates) {
       criteria.push({
         label: AGGREGATES_LABEL,
         maxDistance: req.aggregates.maxDistance,
         weight: req.aggregates.weight ?? 1,
+        kind: 'count',
       });
     }
     const statusCols = { A: [] as ColumnMeta[], B: [] as ColumnMeta[] };
@@ -538,6 +711,7 @@ export class AssociationService {
     };
     const statusRules = [
       ...req.criteria.map((c) => c.status),
+      ...(req.address ? [req.address.status] : []),
       ...(req.aggregates ? [req.aggregates.status] : []),
     ];
     const statusAttr = (s: StatusRule | undefined): StatusAttr | null =>
@@ -567,12 +741,16 @@ export class AssociationService {
       unidentified: unmatchedRule(req.unmatchedStatus?.unidentified, 'B', 'Não Identificado'),
     };
     const statusOf = statusResolver(nameA, plan);
+    const renames = new Map(Object.entries(req.statusRenames ?? {}));
+    const rename = (status: string) => renames.get(status) ?? status;
+    // Cada linha calcula o Status uma vez (contagem) e a coluna Status reaproveita, já renomeado.
+    let lastStatus = '';
     const fields = outputFields(
       { name: nameA, colMap: ctxA.colMap, idKind: ctxA.idCol.kind },
       { name: nameB, colMap: ctxB.colMap, idKind: ctxB.idCol.kind },
       plan.labels,
       req.columns,
-      statusOf,
+      () => rename(lastStatus),
     );
     const attrsOf = (side: 'A' | 'B') =>
       fields.flatMap((f) => (f.attr?.side === side ? [f.attr.column] : []));
@@ -581,28 +759,36 @@ export class AssociationService {
       this.load(
         ctxA,
         req.a.filters,
-        req.criteria.map((c) => this.column(ctxA, c.columnA)),
+        [...req.criteria, ...(req.address ? [req.address] : [])].map((c) =>
+          this.column(ctxA, c.columnA),
+        ),
         attrsOf('A'),
         statusCols.A,
       ),
       this.load(
         ctxB,
         req.b.filters,
-        req.criteria.map((c) => this.column(ctxB, c.columnB)),
+        [...req.criteria, ...(req.address ? [req.address] : [])].map((c) =>
+          this.column(ctxB, c.columnB),
+        ),
         attrsOf('B'),
         statusCols.B,
       ),
     ]);
     if (req.aggregates) {
       for (const pts of [a, b]) {
-        const kinds = aggregateKinds(pts.map((p) => p.coordKey));
-        pts.forEach((p, i) => p.values.push(kinds[i]));
+        const counts = aggregateCounts(pts.map((p) => p.coordKey));
+        pts.forEach((p, i) => p.values.push(counts[i]));
       }
     }
 
     let r;
     try {
-      r = associate(a, b, { maxDistance: req.maxDistance, criteria });
+      r = associate(a, b, {
+        maxDistance: req.maxDistance,
+        criteria,
+        unmatchedCost: req.unmatchedCost,
+      });
     } catch (err) {
       throw new BadRequestException((err as Error).message);
     }
@@ -614,6 +800,7 @@ export class AssociationService {
     const byStatus = new Map<string, number>();
     const row = (p: LoadedPoint | null, q: LoadedPoint | null, pair: PairInfo | null) => {
       const status = statusOf(p, q, pair);
+      lastStatus = status;
       byStatus.set(status, (byStatus.get(status) ?? 0) + 1);
       if (pair && status === 'Ponto Normal') normal++;
       return fields.map((f) => f.value(p, q, pair) ?? null);
@@ -628,7 +815,8 @@ export class AssociationService {
       sumDistance += r.distance[i];
       const met = criteria.map((_, k) => ((r.metMask[i] >> k) & 1) === 1);
       byCriteria[met.filter(Boolean).length]++;
-      const score = criteria.reduce((sum, c, k) => (met[k] ? sum + c.weight : sum), 0);
+      // Penalidades somadas = custo − distância (agregados com 1 de diferença pagam só metade).
+      const score = r.cost[i] - r.distance[i];
       return row(p, b[j], { distance: r.distance[i], met, score: Math.round(score * 1e6) / 1e6 });
     });
     let unmatchedB = 0;
@@ -658,19 +846,20 @@ export class AssociationService {
       normal,
       divergent: matched - normal,
       byStatus: [...byStatus]
-        .map(([status, count]) => ({ status, count }))
+        .map(([original, count]) => ({ status: rename(original), original, count }))
         .sort((x, y) => y.count - x.count || x.status.localeCompare(y.status, 'pt-BR')),
       averageDistance: matched ? Math.round((sumDistance / matched) * 100) / 100 : null,
       durationMs: Date.now() - started,
     };
     this.logger.log({ event: 'association', a: req.a.sourceId, b: req.b.sourceId, ...summary });
-    return {
+    const table: AssociationTable = {
       headers: fields.map((f) => f.header),
       types: fields.map((f) => f.type),
       rows,
       coords,
       summary,
     };
+    return { table, a, b, r, labels: plan.labels };
   }
 
   private column(ctx: SourceContext, name: string) {
@@ -718,6 +907,8 @@ export class AssociationService {
         lat,
         lng,
         coordKey: ll ? `${x}|${y}` : null,
+        x,
+        y,
         values: cols.map((c, k) => normalizeValue(normalizeDb(r[`__c${k}`], c.kind))),
         attrs: attrs.map((c, k) =>
           c === LAT ? lat : c === LNG ? lng : normalizeDb(r[`__a${k}`], c.kind),

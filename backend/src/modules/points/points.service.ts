@@ -79,6 +79,38 @@ export type LayerResponse =
   | { mode: 'tooLarge'; version: string | null; total: number; limit: number }
   | { mode: 'unchanged'; version: string };
 
+/** Ações de pontos que o Ctrl+Z desfaz (cada transação do banco = uma operação). */
+const UNDOABLE = [
+  'CREATE',
+  'UPDATE',
+  'DELETE',
+  'RESTORE',
+  'BULK_UPDATE',
+  'MOVE',
+  'DUPLICATE',
+  'BULK_DELETE',
+];
+const ACTION_LABELS: Record<string, string> = {
+  CREATE: 'adição',
+  UPDATE: 'edição',
+  DELETE: 'exclusão',
+  RESTORE: 'restauração',
+  BULK_UPDATE: 'edição em massa',
+  MOVE: 'movimento',
+  DUPLICATE: 'duplicação',
+  BULK_DELETE: 'exclusão em massa',
+};
+
+/** Última operação que o Ctrl+Z desfaz. */
+export interface UndoInfo {
+  /** Transação do banco que gravou a operação */
+  txId: string;
+  at: Date;
+  /** Registros afetados */
+  total: number;
+  parts: { sourceId: string; sourceName: string; action: string; label: string; count: number }[];
+}
+
 /** Grupos com até este número de registros já trazem os IDs no mapa. */
 const INLINE_IDS = 50;
 const DEFAULT_MAP_LIMIT = 3000;
@@ -852,10 +884,7 @@ export class PointsService {
       throw new BadRequestException(`Informe o valor de "${ctx.idCol.name}"`);
     }
     if (generateId) {
-      await tx.$executeRawUnsafe(
-        `SELECT pg_advisory_xact_lock(hashtext($1))`,
-        this.entity(ctx),
-      );
+      await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, this.entity(ctx));
       const [{ next }] = await tx.$queryRawUnsafe<{ next: string }[]>(
         `SELECT (COALESCE(max(${qi(ctx.idCol.name)}), 0) + 1)::text AS next FROM ${ctx.table}`,
       );
@@ -1071,7 +1100,9 @@ export class PointsService {
   async restoreDeleted(sourceId: string, id: string, userId: string) {
     const ctx = await this.sources.context(sourceId);
     if (ctx.idCol.isGenerated) {
-      throw new BadRequestException(`A coluna "${ctx.idCol.name}" é calculada; não dá para restaurar`);
+      throw new BadRequestException(
+        `A coluna "${ctx.idCol.name}" é calculada; não dá para restaurar`,
+      );
     }
     let data = await this.changes.removedSnapshot(ctx, id);
     if (!Object.keys(data).length) {
@@ -1094,49 +1125,8 @@ export class PointsService {
     return this.prisma.$transaction(
       async (tx) => {
         await this.writePath(ctx, tx);
-        const check = new Params();
-        const exists = await tx.$queryRawUnsafe<unknown[]>(
-          `SELECT 1 FROM ${ctx.table} WHERE ${this.idEquals(ctx, check, id)} LIMIT 1`,
-          ...check.values,
-        );
-        if (exists.length) throw new BadRequestException(`O registro ${id} já existe na camada`);
-
-        const params = new Params();
-        const assignments = ctx.columns
-          .filter(
-            (c) =>
-              c !== ctx.idCol &&
-              c.kind !== 'geometry' &&
-              !c.isGenerated &&
-              !c.readOnly &&
-              Object.prototype.hasOwnProperty.call(data, c.name),
-          )
-          .map((c) => {
-            const p = toParam(data[c.name]);
-            return {
-              col: c.name,
-              expr: p === null ? 'NULL' : `CAST(${params.add(p)} AS ${castType(c)})`,
-            };
-          });
-        assignments.push({
-          col: ctx.idCol.name,
-          expr: `CAST(${params.add(id)} AS ${castType(ctx.idCol)})`,
-        });
-        const x = Number(data[ctx.xCol.name]);
-        const y = Number(data[ctx.yCol.name]);
-        if (ctx.geomCol && data[ctx.xCol.name] != null && data[ctx.yCol.name] != null) {
-          if (Number.isFinite(x) && Number.isFinite(y)) {
-            assignments.push({ col: ctx.geomCol.name, expr: this.geomExpr(ctx, params, x, y) });
-          }
-        }
-
-        await tx.$executeRawUnsafe(
-          `INSERT INTO ${ctx.table} (${assignments.map((a) => qi(a.col)).join(', ')}) ${ctx.idCol.isIdentity ? 'OVERRIDING SYSTEM VALUE' : ''}
-           VALUES (${assignments.map((a) => a.expr).join(', ')})`,
-          ...params.values,
-        );
-        if ((ctx.idCol.kind === 'integer' || ctx.idCol.kind === 'number') && ctx.idCol.hasDefault) {
-          await this.syncIdSequence(tx, ctx);
+        if (!(await this.reinsert(tx, ctx, id, data))) {
+          throw new BadRequestException(`O registro ${id} já existe na camada`);
         }
         const restored = await this.findOne(sourceId, id, tx);
         await this.audit.log(
@@ -1155,6 +1145,420 @@ export class PointsService {
       },
       { timeout: 30_000 },
     );
+  }
+
+  /** Insere de novo um registro removido com os atributos `data` (false = o ID já existe). */
+  private async reinsert(
+    tx: Prisma.TransactionClient,
+    ctx: SourceContext,
+    id: string,
+    data: Record<string, unknown>,
+  ): Promise<boolean> {
+    const check = new Params();
+    const exists = await tx.$queryRawUnsafe<unknown[]>(
+      `SELECT 1 FROM ${ctx.table} WHERE ${this.idEquals(ctx, check, id)} LIMIT 1`,
+      ...check.values,
+    );
+    if (exists.length) return false;
+
+    const params = new Params();
+    const assignments = ctx.columns
+      .filter(
+        (c) =>
+          c !== ctx.idCol &&
+          c.kind !== 'geometry' &&
+          !c.isGenerated &&
+          !c.readOnly &&
+          Object.prototype.hasOwnProperty.call(data, c.name),
+      )
+      .map((c) => {
+        const p = toParam(data[c.name]);
+        return {
+          col: c.name,
+          expr: p === null ? 'NULL' : `CAST(${params.add(p)} AS ${castType(c)})`,
+        };
+      });
+    assignments.push({
+      col: ctx.idCol.name,
+      expr: `CAST(${params.add(id)} AS ${castType(ctx.idCol)})`,
+    });
+    const x = Number(data[ctx.xCol.name]);
+    const y = Number(data[ctx.yCol.name]);
+    if (ctx.geomCol && data[ctx.xCol.name] != null && data[ctx.yCol.name] != null) {
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        assignments.push({ col: ctx.geomCol.name, expr: this.geomExpr(ctx, params, x, y) });
+      }
+    }
+
+    await tx.$executeRawUnsafe(
+      `INSERT INTO ${ctx.table} (${assignments.map((a) => qi(a.col)).join(', ')}) ${ctx.idCol.isIdentity ? 'OVERRIDING SYSTEM VALUE' : ''}
+       VALUES (${assignments.map((a) => a.expr).join(', ')})`,
+      ...params.values,
+    );
+    if ((ctx.idCol.kind === 'integer' || ctx.idCol.kind === 'number') && ctx.idCol.hasDefault) {
+      await this.syncIdSequence(tx, ctx);
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------------- desfazer (Ctrl+Z)
+
+  /**
+   * Última operação do usuário que ainda pode ser desfeita: as linhas do histórico gravadas na
+   * mesma transação (ex.: uma edição em massa inteira). A transação do desfazer e a desfeita ficam
+   * marcadas por uma linha UNDO (o desfazer não é desfeito pelo Ctrl+Z: é refeito pelo Ctrl+Y).
+   * Um refazer (REDO) é uma operação como as outras: o Ctrl+Z desfaz de novo.
+   */
+  async lastUndo(userId: string): Promise<UndoInfo | null> {
+    const [last] = await this.prisma.$queryRawUnsafe<{ tx: string }[]>(
+      `SELECT a."txId"::text AS tx FROM audit_log a
+        WHERE a."userId" = $1 AND a."txId" IS NOT NULL AND a.action = ANY($2::text[])
+          AND a."sourceId" IS NOT NULL AND a.entity <> 'DataSource'
+          AND NOT EXISTS (
+            SELECT 1 FROM audit_log u
+             WHERE u."userId" = $1 AND u.action = 'UNDO'
+               AND (u."txId" = a."txId" OR u."newValue"->>'undoneTx' = a."txId"::text))
+        ORDER BY a.id DESC LIMIT 1`,
+      userId,
+      UNDOABLE,
+    );
+    if (!last) return null;
+    return this.txInfo(last.tx, userId);
+  }
+
+  /** Registros afetados por uma operação (transação) do usuário, por camada e ação. */
+  private async txInfo(txId: string, userId: string): Promise<UndoInfo> {
+    const parts = await this.prisma.$queryRawUnsafe<
+      { sourceId: string; action: string; n: number; at: Date }[]
+    >(
+      `SELECT "sourceId", action, count(*)::int AS n, max("createdAt") AS at FROM audit_log
+        WHERE "txId" = CAST($1 AS bigint) AND "userId" = $2 AND action = ANY($3::text[])
+          AND "sourceId" IS NOT NULL AND entity <> 'DataSource'
+        GROUP BY 1, 2 ORDER BY 3 DESC`,
+      txId,
+      userId,
+      UNDOABLE,
+    );
+    const names = new Map<string, string>();
+    for (const p of parts) {
+      if (names.has(p.sourceId)) continue;
+      const src = await this.prisma.dataSource.findUnique({ where: { id: p.sourceId } });
+      names.set(p.sourceId, src?.name ?? 'camada excluída');
+    }
+    return {
+      txId,
+      at: parts.reduce((m, p) => (p.at > m ? p.at : m), parts[0]?.at ?? new Date(0)),
+      total: parts.reduce((s, p) => s + p.n, 0),
+      parts: parts.map((p) => ({
+        sourceId: p.sourceId,
+        sourceName: names.get(p.sourceId)!,
+        action: p.action,
+        label: ACTION_LABELS[p.action] ?? p.action,
+        count: p.n,
+      })),
+    };
+  }
+
+  /**
+   * Desfaz a operação `txId`, que precisa ser a última do usuário (senão pede para tentar de novo):
+   * valores alterados voltam aos antigos, registros criados são removidos e removidos voltam.
+   * Tudo numa transação, com histórico e Tabela de Alterações.
+   */
+  async undo(userId: string, txId: string) {
+    const last = await this.lastUndo(userId);
+    if (!last || last.txId !== txId) {
+      throw new BadRequestException('A última ação mudou desde a consulta: tente desfazer de novo');
+    }
+    const r = await this.revertTx(userId, txId, 'undo', {
+      action: 'UNDO',
+      newValue: { undoneTx: txId },
+    });
+    return { undone: last, ...r };
+  }
+
+  /**
+   * Último desfazer do usuário que ainda pode ser refeito (Ctrl+Y): o mais recente ainda não
+   * refeito, desde que não haja uma ação nova depois dele (como em qualquer programa, uma ação nova
+   * descarta o que dava para refazer). `txId` = transação do desfazer; as partes descrevem a
+   * operação desfeita.
+   */
+  async lastRedo(userId: string): Promise<UndoInfo | null> {
+    const [u] = await this.prisma.$queryRawUnsafe<
+      { tx: string; undone: string | null; id: bigint }[]
+    >(
+      `SELECT u."txId"::text AS tx, u."newValue"->>'undoneTx' AS undone, u.id FROM audit_log u
+        WHERE u."userId" = $1 AND u.action = 'UNDO' AND u."txId" IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM audit_log r
+             WHERE r."userId" = $1 AND r.action = 'REDO' AND r."newValue"->>'redoneTx' = u."txId"::text)
+        ORDER BY u.id DESC LIMIT 1`,
+      userId,
+    );
+    if (!u?.undone) return null;
+    const [fresh] = await this.prisma.$queryRawUnsafe<{ one: number }[]>(
+      `SELECT 1 AS one FROM audit_log a
+        WHERE a."userId" = $1 AND a.id > $2 AND a."txId" IS NOT NULL AND a.action = ANY($3::text[])
+          AND a."sourceId" IS NOT NULL AND a.entity <> 'DataSource'
+          AND NOT EXISTS (
+            SELECT 1 FROM audit_log m
+             WHERE m."userId" = $1 AND m."txId" = a."txId" AND m.action IN ('UNDO', 'REDO'))
+        LIMIT 1`,
+      userId,
+      u.id,
+      UNDOABLE,
+    );
+    if (fresh) return null;
+    return { ...(await this.txInfo(u.undone, userId)), txId: u.tx };
+  }
+
+  /**
+   * Refaz o desfazer `txId` (precisa ser o que `lastRedo` devolve): o desfazer é revertido, e a
+   * operação volta a valer. Fica marcado por uma linha REDO.
+   */
+  async redo(userId: string, txId: string) {
+    const next = await this.lastRedo(userId);
+    if (!next || next.txId !== txId) {
+      throw new BadRequestException('O que dava para refazer mudou: tente refazer de novo');
+    }
+    const r = await this.revertTx(userId, txId, 'redo', {
+      action: 'REDO',
+      newValue: { redoneTx: txId },
+    });
+    return { redone: next, ...r };
+  }
+
+  /**
+   * Reverte as linhas do histórico da transação `txId` (desfazer uma operação ou, no refazer, um
+   * desfazer) numa transação nova, com histórico, Tabela de Alterações e a linha de marcação.
+   */
+  private async revertTx(
+    userId: string,
+    txId: string,
+    mode: 'undo' | 'redo',
+    marker: { action: 'UNDO' | 'REDO'; newValue: Record<string, string> },
+  ) {
+    const entries = await this.prisma.auditLog.findMany({
+      where: {
+        txId: BigInt(txId),
+        userId,
+        action: { in: UNDOABLE },
+        sourceId: { not: null },
+        entity: { not: 'DataSource' },
+      },
+      orderBy: { id: 'asc' },
+    });
+    const bySource = new Map<string, typeof entries>();
+    for (const e of entries) {
+      const list = bySource.get(e.sourceId!) ?? [];
+      list.push(e);
+      bySource.set(e.sourceId!, list);
+    }
+    const contexts = new Map<string, SourceContext>();
+    for (const sourceId of bySource.keys()) {
+      try {
+        contexts.set(sourceId, await this.sources.context(sourceId));
+      } catch {
+        throw new BadRequestException(
+          `Uma das camadas dessa ação não existe mais: não dá para ${mode === 'undo' ? 'desfazer' : 'refazer'}`,
+        );
+      }
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const counts = { reverted: 0, removed: 0, restored: 0, skipped: 0 };
+        for (const [sourceId, list] of bySource) {
+          const ctx = contexts.get(sourceId)!;
+          await this.writePath(ctx, tx);
+          const r = await this.undoEntries(tx, ctx, list, userId, mode);
+          counts.reverted += r.reverted;
+          counts.removed += r.removed;
+          counts.restored += r.restored;
+          counts.skipped += r.skipped;
+        }
+        await this.audit.log({ userId, entity: mode, ...marker }, tx);
+        return { ...counts, sourceIds: [...bySource.keys()] };
+      },
+      { timeout: 300_000, maxWait: 10_000 },
+    );
+  }
+
+  /**
+   * Desfaz as linhas do histórico de uma camada (na ordem: valores, criados, removidos). No refazer
+   * (`redo`), os pontos que voltam são os que o desfazer tinha tirado: entram na Tabela de
+   * Alterações como adicionados de novo.
+   */
+  private async undoEntries(
+    tx: Prisma.TransactionClient,
+    ctx: SourceContext,
+    entries: { action: string; entityId: string | null; oldValue: unknown }[],
+    userId: string,
+    mode: 'undo' | 'redo' = 'undo',
+  ) {
+    const entity = this.entity(ctx);
+    const asObject = (v: unknown) =>
+      v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+    /** Colunas que voltam ao valor antigo (a geometria é recalculada de X/Y; o ID não muda). */
+    const revertible = (name: string) => {
+      const c = ctx.colMap.get(name);
+      return !!c && c.kind !== 'geometry' && !c.readOnly && !c.isGenerated && c !== ctx.idCol;
+    };
+
+    // Valor mais antigo de cada coluna, se o registro mudou mais de uma vez na operação.
+    const values = new Map<string, Record<string, unknown>>();
+    const created: string[] = [];
+    const restoredBefore: string[] = [];
+    const deleted = new Map<string, Record<string, unknown>>();
+    for (const e of entries) {
+      const id = e.entityId;
+      if (!id) continue;
+      if (e.action === 'UPDATE' || e.action === 'BULK_UPDATE' || e.action === 'MOVE') {
+        const cur = values.get(id) ?? {};
+        for (const [k, v] of Object.entries(asObject(e.oldValue))) {
+          if (revertible(k) && !(k in cur)) cur[k] = v;
+        }
+        if (Object.keys(cur).length) values.set(id, cur);
+      } else if (e.action === 'CREATE' || e.action === 'DUPLICATE') created.push(id);
+      else if (e.action === 'RESTORE') restoredBefore.push(id);
+      else if (!deleted.has(id)) deleted.set(id, asObject(e.oldValue));
+    }
+    let reverted = 0;
+    let skipped = 0;
+
+    if (values.size) {
+      const ids = [...values.keys()];
+      const names = [...new Set(ids.flatMap((id) => Object.keys(values.get(id)!)))];
+      const before = await this.valuesById(tx, ctx, ids, names);
+      skipped += ids.length - before.size;
+      // Uma atualização por conjunto de colunas, com os valores por registro (unnest).
+      const groups = new Map<string, string[]>();
+      for (const id of ids) {
+        if (!before.has(id)) continue;
+        const key = Object.keys(values.get(id)!).sort().join('\u0000');
+        groups.set(key, [...(groups.get(key) ?? []), id]);
+      }
+      for (const [key, gids] of groups) {
+        const cols = key.split('\u0000').map((n) => ctx.colMap.get(n)!);
+        const params = new Params();
+        const arrays = [
+          `CAST(${params.add(gids)} AS text[])`,
+          ...cols.map(
+            (c) =>
+              `CAST(${params.add(gids.map((id) => toParam(values.get(id)![c.name])))} AS text[])`,
+          ),
+        ];
+        const alias = ['__sid', ...cols.map((_, k) => `__c${k}`)];
+        const sets = cols.map((c, k) => `${qi(c.name)} = CAST(v.__c${k} AS ${castType(c)})`);
+        const ix = cols.indexOf(ctx.xCol);
+        const iy = cols.indexOf(ctx.yCol);
+        if (ctx.geomCol && (ix >= 0 || iy >= 0)) {
+          const coord = (k: number, expr: string) =>
+            k >= 0 ? `CAST(replace(v.__c${k}, ',', '.') AS float8)` : expr;
+          sets.push(
+            `${qi(ctx.geomCol.name)} = ${pgis('ST_SetSRID')}(${pgis('ST_MakePoint')}(${coord(ix, ctx.xExpr)}, ${coord(iy, ctx.yExpr)}), ${Math.trunc(ctx.geomSrid)})`,
+          );
+        }
+        reverted += await tx.$executeRawUnsafe(
+          `UPDATE ${ctx.table} AS t SET ${sets.join(', ')}
+             FROM unnest(${arrays.join(', ')}) AS v(${alias.join(', ')})
+            WHERE t.${qi(ctx.idCol.name)} = CAST(v.__sid AS ${castType(ctx.idCol)})`,
+          ...params.values,
+        );
+      }
+      const after = await this.valuesById(tx, ctx, [...before.keys()], names);
+      const changed = [...before].map(([id, old]) => ({
+        id,
+        before: old,
+        after: after.get(id) ?? old,
+      }));
+      await this.audit.logMany(
+        changed.map((c) => {
+          const d = AuditService.diff(c.before, c.after);
+          return {
+            userId,
+            action: 'UPDATE',
+            entity,
+            entityId: c.id,
+            sourceId: ctx.source.id,
+            oldValue: d.oldValue,
+            newValue: d.newValue,
+          };
+        }),
+        tx,
+      );
+      await this.changes.logUpdate(tx, ctx, changed);
+    }
+
+    // Criados (e restaurados) na operação: saem da camada.
+    const toRemove = [...new Set([...created, ...restoredBefore])];
+    let removed = 0;
+    if (toRemove.length) {
+      const p1 = new Params();
+      const rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+        `SELECT ${this.fullSelect(ctx)} FROM ${ctx.table} WHERE ${this.idIn(ctx, p1, toRemove)}`,
+        ...p1.values,
+      );
+      const recs = rows.map((r) => this.toRecord(ctx, r));
+      skipped += toRemove.length - recs.length;
+      const p2 = new Params();
+      removed = await tx.$executeRawUnsafe(
+        `DELETE FROM ${ctx.table} WHERE ${this.idIn(ctx, p2, toRemove)}`,
+        ...p2.values,
+      );
+      await this.audit.logMany(
+        recs.map((rec) => ({
+          userId,
+          action: 'DELETE',
+          entity,
+          entityId: rec.id,
+          sourceId: ctx.source.id,
+          oldValue: rec.data,
+        })),
+        tx,
+      );
+      // Inclusão desfeita some da Tabela de Alterações; restauração desfeita volta a ser remoção.
+      const restoredSet = new Set(restoredBefore);
+      await this.changes.forget(
+        tx,
+        ctx,
+        recs.filter((r) => !restoredSet.has(r.id)).map((r) => r.id),
+      );
+      await this.changes.logDelete(
+        tx,
+        ctx,
+        recs.filter((r) => restoredSet.has(r.id)),
+      );
+    }
+
+    // Removidos na operação: voltam com os atributos guardados no histórico.
+    const back: string[] = [];
+    for (const [id, data] of deleted) {
+      if (Object.keys(data).length && (await this.reinsert(tx, ctx, id, data))) back.push(id);
+      else skipped++;
+    }
+    if (back.length) {
+      const p3 = new Params();
+      const restored = (
+        await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+          `SELECT ${this.fullSelect(ctx)} FROM ${ctx.table} WHERE ${this.idIn(ctx, p3, back)}`,
+          ...p3.values,
+        )
+      ).map((r) => this.toRecord(ctx, r));
+      await this.audit.logMany(
+        back.map((id) => ({
+          userId,
+          action: 'RESTORE',
+          entity,
+          entityId: id,
+          sourceId: ctx.source.id,
+          newValue: restored.find((r) => r.id === id)?.data ?? deleted.get(id),
+        })),
+        tx,
+      );
+      if (mode === 'redo') await this.changes.logCreate(tx, ctx, back);
+      else await this.changes.forget(tx, ctx, back);
+    }
+    return { reverted, removed, restored: back.length, skipped };
   }
 
   /** Valida as alterações de uma edição em massa e devolve as colunas alteradas. */
@@ -1272,7 +1676,8 @@ export class PointsService {
     const used = new Set<string>();
     for (const [from, to] of Object.entries(mapping ?? {})) {
       if (!to) continue;
-      if (!src.colMap.has(from)) throw new BadRequestException(`Coluna "${from}" não existe na origem`);
+      if (!src.colMap.has(from))
+        throw new BadRequestException(`Coluna "${from}" não existe na origem`);
       const col = dst.colMap.get(to);
       if (!col) throw new BadRequestException(`Coluna "${to}" não existe em ${dst.source.name}`);
       if (col.readOnly || coordCols.has(to))
@@ -1330,7 +1735,10 @@ export class PointsService {
       { timeout: 300_000, maxWait: 10_000 },
     );
 
-    const groups = new Map<string, { key: string; x: number; y: number; lat: number; lng: number; ids: string[] }>();
+    const groups = new Map<
+      string,
+      { key: string; x: number; y: number; lat: number; lng: number; ids: string[] }
+    >();
     for (const c of created) {
       if (c.x === null || c.y === null || c.lat === null || c.lng === null) continue;
       const key = coordKey(c.x, c.y);
@@ -1556,6 +1964,138 @@ export class PointsService {
           g.ids.push(r.id);
         }
         return { count: rows.length, dx, dy, groups: [...groups.values()] };
+      },
+      { timeout: 120_000, maxWait: 10_000 },
+    );
+  }
+
+  /**
+   * Move cada registro de `sourceId` para a posição do registro pareado de `targetId` (ex.: ponto
+   * associado de outra camada). Pares cujo destino não existe ou não tem coordenada são ignorados.
+   */
+  async snapTo(
+    sourceId: string,
+    targetId: string,
+    pairs: { id: string; targetId: string }[],
+    userId: string,
+  ) {
+    const [ctx, tctx] = await Promise.all([
+      this.sources.context(sourceId),
+      this.sources.context(targetId),
+    ]);
+    const pt = new Params();
+    const targets = await this.prisma.$queryRawUnsafe<{ id: string; x: number; y: number }[]>(
+      `SELECT ${qi(tctx.idCol.name)}::text AS id, ${tctx.xExpr} AS x, ${tctx.yExpr} AS y
+         FROM ${tctx.table}
+        WHERE (${this.idIn(tctx, pt, [...new Set(pairs.map((p) => p.targetId))])})
+          AND (${tctx.validCoordSql(pt)})`,
+      ...pt.values,
+    );
+    const decimals = ctx.crs.def.kind === 'geographic' ? 8 : 3;
+    const f = 10 ** decimals;
+    const posOf = new Map<string, { x: number; y: number }>();
+    for (const t of targets) {
+      const ll = tctx.crs.toLatLng(t.x, t.y);
+      const xy = ll && ctx.crs.toXY(ll.lat, ll.lng);
+      if (!xy) continue;
+      const x = Math.round(xy.x * f) / f;
+      const y = Math.round(xy.y * f) / f;
+      this.validateCoords(ctx, x, y);
+      posOf.set(t.id, { x, y });
+    }
+    const moves = new Map<string, { x: number; y: number }>();
+    for (const p of pairs) {
+      const pos = posOf.get(p.targetId);
+      if (pos && !moves.has(p.id)) moves.set(p.id, pos);
+    }
+    const ids = [...moves.keys()];
+    if (!ids.length) return { count: 0, skipped: pairs.length, groups: [] };
+
+    const id = qi(ctx.idCol.name);
+    return this.prisma.$transaction(
+      async (tx) => {
+        await this.writePath(ctx, tx);
+        const xy = [ctx.xCol.name, ctx.yCol.name];
+        const pOld = new Params();
+        const old = await tx.$queryRawUnsafe<{ id: string; x: number | null; y: number | null }[]>(
+          `SELECT ${id}::text AS id, ${ctx.xExpr} AS x, ${ctx.yExpr} AS y FROM ${ctx.table}
+            WHERE ${this.idIn(ctx, pOld, ids)}`,
+          ...pOld.values,
+        );
+        const typedBefore = await this.valuesById(tx, ctx, ids, xy);
+
+        const params = new Params();
+        const pIds = params.add(ids);
+        const pXs = params.add(ids.map((k) => moves.get(k)!.x));
+        const pYs = params.add(ids.map((k) => moves.get(k)!.y));
+        const sets = [
+          `${qi(ctx.xCol.name)} = CAST(v.__nx AS ${castType(ctx.xCol)})`,
+          `${qi(ctx.yCol.name)} = CAST(v.__ny AS ${castType(ctx.yCol)})`,
+        ];
+        if (ctx.geomCol) {
+          sets.push(
+            `${qi(ctx.geomCol.name)} = ${pgis('ST_SetSRID')}(${pgis('ST_MakePoint')}(v.__nx, v.__ny), ${Math.trunc(ctx.geomSrid)})`,
+          );
+        }
+        const rows = await tx.$queryRawUnsafe<{ id: string; x: number; y: number }[]>(
+          `UPDATE ${ctx.table} AS t SET ${sets.join(', ')}
+             FROM unnest(CAST(${pIds} AS text[]), CAST(${pXs} AS float8[]), CAST(${pYs} AS float8[]))
+                  AS v(__sid, __nx, __ny)
+            WHERE t.${id} = CAST(v.__sid AS ${castType(ctx.idCol)})
+           RETURNING t.${id}::text AS id, ${ctx.xExpr} AS x, ${ctx.yExpr} AS y`,
+          ...params.values,
+        );
+        const before = new Map(old.map((r) => [r.id, r]));
+        await this.audit.logMany(
+          rows.map((r) => ({
+            userId,
+            action: 'MOVE',
+            entity: this.entity(ctx),
+            entityId: r.id,
+            sourceId,
+            oldValue: {
+              [ctx.xCol.name]: before.get(r.id)?.x ?? null,
+              [ctx.yCol.name]: before.get(r.id)?.y ?? null,
+            },
+            newValue: { [ctx.xCol.name]: r.x, [ctx.yCol.name]: r.y },
+          })),
+          tx,
+        );
+        const typedAfter = await this.valuesById(
+          tx,
+          ctx,
+          rows.map((r) => r.id),
+          xy,
+        );
+        await this.changes.logUpdate(
+          tx,
+          ctx,
+          rows.map((r) => ({
+            id: r.id,
+            before: typedBefore.get(r.id) ?? {},
+            after: typedAfter.get(r.id) ?? {},
+          })),
+        );
+
+        const groups = new Map<
+          string,
+          { key: string; x: number; y: number; lat: number; lng: number; ids: string[] }
+        >();
+        for (const r of rows) {
+          const key = coordKey(r.x, r.y);
+          let g = groups.get(key);
+          if (!g) {
+            const ll = ctx.crs.toLatLng(r.x, r.y);
+            if (!ll) continue;
+            groups.set(key, (g = { key, x: r.x, y: r.y, ...ll, ids: [] }));
+          }
+          g.ids.push(r.id);
+        }
+        return {
+          count: rows.length,
+          skipped: pairs.length - rows.length,
+          groups: [...groups.values()],
+        };
       },
       { timeout: 120_000, maxWait: 10_000 },
     );

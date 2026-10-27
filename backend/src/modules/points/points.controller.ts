@@ -36,6 +36,8 @@ import {
   SelectionDto,
   SummaryDto,
   CopyToSourceDto,
+  SnapToDto,
+  UndoDto,
   TranslateDto,
   UpdatePointDto,
 } from './dto/points.dto';
@@ -148,7 +150,9 @@ export class PointsController {
   }
 
   @Patch('replace')
-  @ApiOperation({ summary: 'Substituição: mesmo valor em todos os registros filtrados (transação)' })
+  @ApiOperation({
+    summary: 'Substituição: mesmo valor em todos os registros filtrados (transação)',
+  })
   replace(@Body() dto: ReplaceDto, @CurrentUser() user: string) {
     return this.points.replaceFiltered(dto.sourceId, parseFilters(dto.filters), dto.changes, user);
   }
@@ -165,6 +169,14 @@ export class PointsController {
       user,
       dto.observation,
     );
+  }
+
+  @Post('snap')
+  @ApiOperation({
+    summary: 'Move cada registro para a posição do registro pareado de outra camada (transação)',
+  })
+  snap(@Body() dto: SnapToDto, @CurrentUser() user: string) {
+    return this.points.snapTo(dto.sourceId, dto.targetId, dto.pairs, user);
   }
 
   @Post('copy-to-source')
@@ -186,6 +198,30 @@ export class PointsController {
   @ApiOperation({ summary: 'Exclusão em massa (transação)' })
   bulkDelete(@Body() dto: BulkDeleteDto, @CurrentUser() user: string) {
     return this.points.bulkDelete(dto.sourceId, dto.ids, user, dto.observation);
+  }
+
+  @Get('undo')
+  @ApiOperation({ summary: 'Última operação do usuário que o Ctrl+Z desfaz (null = nenhuma)' })
+  async lastUndo(@CurrentUser() user: string) {
+    return { last: await this.points.lastUndo(user) };
+  }
+
+  @Post('undo')
+  @ApiOperation({ summary: 'Desfaz a última operação do usuário (transação)' })
+  undo(@Body() dto: UndoDto, @CurrentUser() user: string) {
+    return this.points.undo(user, dto.txId);
+  }
+
+  @Get('redo')
+  @ApiOperation({ summary: 'Último desfazer do usuário que o Ctrl+Y refaz (null = nenhum)' })
+  async lastRedo(@CurrentUser() user: string) {
+    return { next: await this.points.lastRedo(user) };
+  }
+
+  @Post('redo')
+  @ApiOperation({ summary: 'Refaz o último desfazer do usuário (transação)' })
+  redo(@Body() dto: UndoDto, @CurrentUser() user: string) {
+    return this.points.redo(user, dto.txId);
   }
 
   @Get(':id')

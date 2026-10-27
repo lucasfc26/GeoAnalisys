@@ -1,6 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { extname } from 'path';
+import { randomUUID } from 'crypto';
+import { unlink } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ColumnMeta, Params, castType, pgis, qi, qualified } from '../../common/sql';
 import {
@@ -15,28 +18,102 @@ import { CrsService } from '../maps/crs.service';
 import { CatalogService } from '../tables/catalog.service';
 import { SourcesService } from '../tables/sources.service';
 import {
+  Cell,
   ImportType,
   Sheet,
   columnNamesFrom,
   convert,
-  decodeText,
+  coordColumns,
+  coordOf,
+  fitRow,
   freeName,
-  geoJsonToSheet,
   inferTypes,
-  parseCsv,
-  readCoordinates,
-  readWorkbook,
-  sheetRows,
   suggestColumns,
   tableNameFrom,
   tableValue,
   toSheet,
+  widenType,
 } from './import.parse';
+import { ImportFileError, RowSource, openRows } from './import.stream';
 
 export interface Upload {
   originalname: string;
   buffer: Buffer;
   size: number;
+}
+
+/** Arquivo de importação gravado em disco pelo upload. */
+export interface StoredUpload {
+  originalname: string;
+  path: string;
+  size: number;
+}
+
+/** Pasta dos arquivos enviados para importar (apagados ao importar ou depois de UPLOAD_TTL_MS). */
+export const UPLOAD_DIR = join(tmpdir(), 'geoanalisys-import');
+const UPLOAD_TTL_MS = 6 * 3600_000;
+const JOB_TTL_MS = 3600_000;
+/** Linhas lidas para a prévia (tipos e sugestões) e, na importação, antes de criar a tabela */
+const PREVIEW_SAMPLE = 1000;
+const IMPORT_SAMPLE = 5000;
+/** Linhas por INSERT na importação */
+const BATCH_ROWS = 5000;
+
+export interface ImportResult {
+  source: Awaited<ReturnType<SourcesService['create']>>;
+  rows: number;
+  schema: string;
+  tableName: string;
+  /** Valores que não couberam no tipo escolhido (ficaram vazios), por coluna */
+  invalid: Record<string, number>;
+}
+
+/** Andamento de uma importação em segundo plano. */
+export interface ImportJobStatus {
+  id: string;
+  /** reading = lendo e gravando; indexing = criando índices e registrando a camada */
+  phase: 'reading' | 'indexing' | 'done' | 'error' | 'cancelled';
+  /** Linhas gravadas */
+  rows: number;
+  /** Parte do arquivo lida (0–1) */
+  percent: number;
+  result?: ImportResult;
+  error?: string;
+}
+
+interface ImportJob extends ImportJobStatus {
+  userId: string;
+  cancel: boolean;
+  finishedAt?: number;
+}
+
+class ImportCancelled extends Error {}
+
+interface ImportPlan {
+  width: number;
+  headers: string[];
+  types: ImportType[];
+  /** Tipo detectado (pode alargar durante a gravação) */
+  auto: boolean[];
+  at: { pair: number; xi: number; yi: number };
+  /** X/Y só com números: gravados como número nas próprias colunas */
+  plain: boolean;
+  geographic: boolean;
+  crs: ReturnType<CrsService['resolve']>;
+  convert: boolean;
+  /** Colunas novas (coordenadas decimais e convertidas) */
+  extra: {
+    name: string;
+    type: ImportType;
+    value: (p: {
+      xy: { x: number; y: number } | null;
+      ll: { lat: number; lng: number } | null;
+      utm: ReturnType<typeof latLngToUtm> | null;
+    }) => string | number | null;
+  }[];
+  xColumn: string;
+  yColumn: string;
+  autoId: string | null;
 }
 
 /**
@@ -105,6 +182,8 @@ const importTypeOf = (c: ColumnMeta): ImportType =>
  */
 @Injectable()
 export class LayersService {
+  private readonly logger = new Logger(LayersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly sources: SourcesService,
@@ -112,85 +191,126 @@ export class LayersService {
     private readonly crs: CrsService,
   ) {}
 
-  // ---------------------------------------------------------------- leitura do arquivo
+  // ---------------------------------------------------------------- arquivos enviados
 
-  private async load(
-    file: Upload | undefined,
-    sheet?: string | null,
-  ): Promise<{
-    sheets: string[];
-    sheet: string | null;
-    data: Sheet;
-    /** GeoJSON: colunas de coordenada geradas */
-    geo: { xColumn: string; yColumn: string } | null;
-  }> {
-    if (!file?.buffer?.length)
+  /** Arquivos enviados para importar (em disco), por id; apagados ao importar ou após 6 h. */
+  private readonly uploads = new Map<string, StoredUpload & { at: number }>();
+  /** Importações em andamento ou recém-terminadas, por id. */
+  private readonly jobs = new Map<string, ImportJob>();
+
+  /** Guarda o arquivo recebido (já gravado em disco pelo upload) e devolve o id dele. */
+  private keepUpload(file: StoredUpload | undefined) {
+    if (!file?.path || !file.size)
       throw new BadRequestException('Envie um arquivo .csv, .xlsx, .geojson ou .kml');
-    const ext = extname(file.originalname || '').toLowerCase();
-    if (ext === '.geojson' || ext === '.json') {
-      try {
-        const { sheet: data, xColumn, yColumn } = geoJsonToSheet(decodeText(file.buffer));
-        return { sheets: [], sheet: null, data, geo: { xColumn, yColumn } };
-      } catch (e) {
-        throw new BadRequestException((e as Error).message);
-      }
-    }
-    let sheets: string[] = [];
-    let chosen: string | null = null;
-    let rows;
-    if (ext === '.xlsx' || ext === '.xlsm') {
-      const wb = await readWorkbook(file.buffer).catch((e: Error) => {
-        throw new BadRequestException(e.message);
-      });
-      sheets = wb.worksheets.map((w) => w.name);
-      const ws = (sheet && wb.getWorksheet(sheet)) || wb.worksheets[0];
-      if (!ws) throw new BadRequestException('A planilha não tem abas');
-      chosen = ws.name;
-      rows = sheetRows(ws);
-    } else if (ext === '.csv' || ext === '.txt' || ext === '.tsv') {
-      rows = parseCsv(decodeText(file.buffer));
-    } else if (ext === '.xls') {
-      throw new BadRequestException(
-        'Arquivos .xls antigos não são suportados: salve como .xlsx ou .csv',
-      );
-    } else {
-      throw new BadRequestException('Formato não suportado: use .csv, .xlsx, .geojson ou .kml');
-    }
-    const data = toSheet(rows);
-    if (!data.headers.length)
-      throw new BadRequestException(
-        chosen ? `A aba "${chosen}" está vazia` : 'O arquivo está vazio',
-      );
-    return { sheets, sheet: chosen, data, geo: null };
+    this.sweep();
+    const id = randomUUID();
+    this.uploads.set(id, { ...file, at: Date.now() });
+    return id;
   }
 
-  /** Abas, cabeçalhos, tipos detectados, primeiras linhas e sugestões de ID/X/Y. */
-  async preview(file: Upload | undefined, sheet?: string | null) {
-    const { sheets, sheet: chosen, data, geo } = await this.load(file, sheet);
+  private upload(id: string | null | undefined) {
+    const u = id ? this.uploads.get(id) : undefined;
+    if (!u)
+      throw new BadRequestException('O arquivo expirou ou não foi enviado: escolha-o de novo');
+    u.at = Date.now();
+    return u;
+  }
+
+  private dropUpload(id: string) {
+    const u = this.uploads.get(id);
+    this.uploads.delete(id);
+    if (u) void unlink(u.path).catch(() => undefined);
+  }
+
+  /** Apaga arquivos esquecidos e importações terminadas há muito tempo. */
+  private sweep() {
+    const now = Date.now();
+    for (const [id, u] of this.uploads) if (now - u.at > UPLOAD_TTL_MS) this.dropUpload(id);
+    for (const [id, j] of this.jobs) {
+      if (j.finishedAt && now - j.finishedAt > JOB_TTL_MS) this.jobs.delete(id);
+    }
+  }
+
+  private async open(u: StoredUpload, sheet?: string | null) {
+    try {
+      return await openRows(u.path, u.originalname, sheet);
+    } catch (e) {
+      if (e instanceof ImportFileError) throw new BadRequestException(e.message);
+      throw e;
+    }
+  }
+
+  /**
+   * Cabeçalho e amostra (até `limit` linhas) do arquivo; `ended` = o arquivo acabou dentro da
+   * amostra. A leitura continua de onde parou em `src.rows`.
+   */
+  private async sample(src: RowSource, limit: number) {
+    const raw: Cell[][] = [];
+    let ended = true;
+    try {
+      for (;;) {
+        if (raw.length > limit) {
+          ended = false;
+          break;
+        }
+        const next = await src.rows.next();
+        if (next.done) break;
+        raw.push(next.value);
+      }
+    } catch (e) {
+      src.close();
+      throw new BadRequestException(
+        `Não foi possível ler o arquivo: ${(e as Error).message || 'formato inválido'}`,
+      );
+    }
+    if (!raw.length) {
+      src.close();
+      throw new BadRequestException(
+        src.sheet ? `A aba "${src.sheet}" está vazia` : 'O arquivo está vazio',
+      );
+    }
+    // Largura: a maior entre o cabeçalho e a amostra (colunas sem nome viram coluna_N).
+    const data = toSheet(raw);
+    return { data, ended };
+  }
+
+  /**
+   * Abas, cabeçalhos, tipos detectados (na amostra), primeiras linhas e sugestões de ID/X/Y. Recebe
+   * o arquivo (que fica guardado) ou o id de um já enviado (ex.: trocar de aba). Só o começo do
+   * arquivo é lido: `total` só vem quando o arquivo inteiro coube na amostra.
+   */
+  async preview(file: StoredUpload | undefined, uploadId?: string | null, sheet?: string | null) {
+    const id = file ? this.keepUpload(file) : uploadId!;
+    const u = this.upload(id);
+    const src = await this.open(u, sheet);
+    const { data, ended } = await this.sample(src, PREVIEW_SAMPLE);
+    src.close();
     const types = inferTypes(data);
     const suggested: ReturnType<typeof suggestColumns> & { coordinateSystem: string | null } = {
       ...suggestColumns(data, types),
       coordinateSystem: null,
     };
-    if (geo) {
+    if (src.geo) {
       // GeoJSON: colunas geradas, em lon/lat WGS84 (salvo arquivos antigos em coordenadas projetadas).
-      const x = data.headers.indexOf(geo.xColumn);
-      const y = data.headers.indexOf(geo.yColumn);
+      const x = data.headers.indexOf(src.geo.xColumn);
+      const y = data.headers.indexOf(src.geo.yColumn);
       const inRange = (c: number, lim: number) =>
         data.rows.every((r) => r[c] === null || Math.abs(r[c] as number) <= lim);
       const geographic = inRange(x, 180) && inRange(y, 90);
-      suggested.xColumn = geo.xColumn;
-      suggested.yColumn = geo.yColumn;
+      suggested.xColumn = src.geo.xColumn;
+      suggested.yColumn = src.geo.yColumn;
       suggested.coordinates = geographic ? 'geographic' : 'projected';
       suggested.coordinateSystem = geographic ? 'EPSG:4326' : null;
     }
     return {
-      sheets,
-      sheet: chosen,
+      uploadId: id,
+      sheets: src.sheets,
+      sheet: src.sheet,
       headers: data.headers,
       types,
       rows: data.rows.slice(0, 20),
-      total: data.rows.length,
+      total: ended ? data.rows.length : null,
+      size: u.size,
       suggested,
     };
   }
@@ -276,12 +396,62 @@ export class LayersService {
 
   // ---------------------------------------------------------------- importar
 
-  async import(file: Upload | undefined, cfg: ImportConfig, userId: string) {
+  /**
+   * Começa a importar o arquivo enviado (`uploadId`) como nova camada e devolve o id da tarefa:
+   * cabeçalho e configuração são conferidos agora (erros voltam na hora); a leitura e a gravação
+   * seguem em segundo plano, em partes (ver `importStatus`).
+   */
+  async startImport(uploadId: string, cfg: ImportConfig, userId: string) {
     const name = cfg?.name?.trim();
     if (!name || name.length > 120)
       throw new BadRequestException('Informe o nome da camada (até 120 caracteres)');
     const schema = await this.targetSchema(cfg.schema);
-    const { data } = await this.load(file, cfg.sheet);
+    const u = this.upload(uploadId);
+    const src = await this.open(u, cfg.sheet);
+    const { data, ended } = await this.sample(src, IMPORT_SAMPLE);
+    let plan: ImportPlan;
+    try {
+      plan = this.importPlan(data, cfg);
+    } catch (e) {
+      src.close();
+      throw e;
+    }
+    this.sweep();
+    const job: ImportJob = {
+      id: randomUUID(),
+      userId,
+      phase: 'reading',
+      rows: 0,
+      percent: 0,
+      cancel: false,
+    };
+    this.jobs.set(job.id, job);
+    void this.runImport(job, src, data, ended, plan, { ...cfg, name }, schema, uploadId);
+    return { jobId: job.id };
+  }
+
+  /** Andamento da importação (o resultado vem quando `phase` = done). */
+  importStatus(jobId: string, userId: string): ImportJobStatus {
+    const job = this.jobs.get(jobId);
+    if (!job || job.userId !== userId) throw new NotFoundException('Importação não encontrada');
+    const { id, phase, rows, percent, result, error } = job;
+    return { id, phase, rows, percent, result, error };
+  }
+
+  /** Pede para parar: a tabela criada é apagada. */
+  cancelImport(jobId: string, userId: string) {
+    const job = this.jobs.get(jobId);
+    if (!job || job.userId !== userId) throw new NotFoundException('Importação não encontrada');
+    job.cancel = true;
+    return { cancelled: true };
+  }
+
+  /**
+   * Tipos, coordenadas e colunas extras pela configuração e pela amostra. Os tipos que o usuário
+   * escolheu ficam fixos (valores que não cabem ficam vazios); os detectados alargam durante a
+   * gravação se aparecer um valor que não cabe (inteiro → decimal → texto).
+   */
+  private importPlan(data: Sheet, cfg: ImportConfig): ImportPlan {
     const has = (h?: string | null) => !!h && data.headers.includes(h);
     if (cfg.coordColumn) {
       if (!has(cfg.coordColumn))
@@ -301,43 +471,42 @@ export class LayersService {
     if (!data.rows.length)
       throw new BadRequestException('A planilha não tem linhas de dados (só o cabeçalho)');
 
-    // Tipos: inferidos, ajustados pelo usuário.
     const inferred = inferTypes(data);
-    const types: ImportType[] = data.headers.map((h, i) => {
+    const chosen = (h: string) => {
       const t = cfg.types?.[h];
-      return t === 'integer' || t === 'number' || t === 'text' ? t : inferred[i];
-    });
+      return t === 'integer' || t === 'number' || t === 'text' ? t : null;
+    };
+    const types: ImportType[] = data.headers.map((h, i) => chosen(h) ?? inferred[i]);
+    const auto = data.headers.map((h) => !chosen(h));
 
     // Coordenadas lidas em qualquer formato (vírgula decimal, GMS, par numa célula). Colunas X/Y só
     // com números recebem o valor numérico; com texto (ex.: 3º 50' 37" S) ou com o par numa célula,
     // o original fica como texto e o valor vai para colunas novas (longitude/latitude ou utm_x/utm_y).
     const geographic = crs.def.kind === 'geographic';
-    const xy = readCoordinates(data, cfg, geographic);
+    const at = coordColumns(data.headers, cfg);
     const taken = new Set(data.headers.map((h) => h.toLowerCase()));
-    const xIdx = cfg.coordColumn ? -1 : data.headers.indexOf(cfg.xColumn!);
-    const yIdx = cfg.coordColumn ? -1 : data.headers.indexOf(cfg.yColumn!);
     const plainNumbers = (c: number) =>
       data.rows.every(
         (r) => r[c] === null || typeof r[c] === 'number' || parseNumber(String(r[c])) !== null,
       );
+    const plain = at.xi >= 0 && at.yi >= 0 && plainNumbers(at.xi) && plainNumbers(at.yi);
     let xColumn: string;
     let yColumn: string;
-    const extra: {
-      name: string;
-      type: ImportType;
-      value: (i: number) => string | number | null;
-    }[] = [];
-    if (xIdx >= 0 && yIdx >= 0 && plainNumbers(xIdx) && plainNumbers(yIdx)) {
+    const extra: ImportPlan['extra'] = [];
+    if (plain) {
       xColumn = cfg.xColumn!;
       yColumn = cfg.yColumn!;
-      types[xIdx] = 'number';
-      types[yIdx] = 'number';
-      data.rows.forEach((r, i) => {
-        r[xIdx] = xy[i]?.x ?? parseCoordValue(r[xIdx]);
-        r[yIdx] = xy[i]?.y ?? parseCoordValue(r[yIdx]);
-      });
+      for (const c of [at.xi, at.yi]) {
+        types[c] = 'number';
+        auto[c] = false;
+      }
     } else {
-      for (const c of [xIdx, yIdx]) if (c >= 0 && types[c] !== 'text') types[c] = 'text';
+      for (const c of [at.xi, at.yi]) {
+        if (c >= 0) {
+          types[c] = 'text';
+          auto[c] = false;
+        }
+      }
       const [xn, yn] = geographic
         ? ['longitude', 'latitude']
         : crs.def.kind === 'utm'
@@ -346,80 +515,178 @@ export class LayersService {
       xColumn = freeName(xn, taken);
       yColumn = freeName(yn, taken);
       extra.push(
-        { name: xColumn, type: 'number', value: (i) => xy[i]?.x ?? null },
-        { name: yColumn, type: 'number', value: (i) => xy[i]?.y ?? null },
+        { name: xColumn, type: 'number', value: (p) => p.xy?.x ?? null },
+        { name: yColumn, type: 'number', value: (p) => p.xy?.y ?? null },
       );
     }
-    const unread = xy.filter((p) => !p).length;
-
     // Coordenadas convertidas para o outro sistema (lat/lng ↔ UTM).
     if (cfg.convertCoordinates) {
-      const ll = xy.map((p) => (p ? crs.toLatLng(p.x, p.y) : null));
-      const utm = ll.map((p) => (p ? latLngToUtm(p.lat, p.lng) : null));
       for (const f of convertedFields(crs.def.kind)) {
         extra.push({
           name: freeName(f, taken),
           type: f === 'utm_zona' ? 'text' : 'number',
-          value: (i) => convertedValue(f, ll[i], utm[i]),
+          value: (p) => convertedValue(f, p.ll, p.utm),
         });
       }
     }
-    for (const e of extra) {
-      data.headers.push(e.name);
-      types.push(e.type);
-    }
-    data.rows.forEach((r, i) => {
-      for (const e of extra) r.push(e.value(i));
-    });
-
     // ID automático com nome livre (id, id_gis, id_gis_2…).
     let autoId: string | null = null;
     if (!cfg.idColumn) {
-      const taken = new Set(data.headers.map((h) => h.toLowerCase()));
-      autoId = taken.has('id') ? 'id_gis' : 'id';
-      for (let n = 2; taken.has(autoId.toLowerCase()); n++) autoId = `id_gis_${n}`;
+      const names = new Set(
+        [...data.headers, ...extra.map((e) => e.name)].map((h) => h.toLowerCase()),
+      );
+      autoId = names.has('id') ? 'id_gis' : 'id';
+      for (let n = 2; names.has(autoId.toLowerCase()); n++) autoId = `id_gis_${n}`;
     }
+    return {
+      width: data.headers.length,
+      headers: data.headers,
+      types,
+      auto,
+      at,
+      plain,
+      geographic,
+      crs,
+      convert: !!cfg.convertCoordinates,
+      extra,
+      xColumn,
+      yColumn,
+      autoId,
+    };
+  }
 
-    const tableName = await this.freeTableName(schema, name);
-    const table = qualified(schema, tableName);
-    const defs = [
-      ...(autoId ? [`${qi(autoId)} bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY`] : []),
-      ...data.headers.map((h, i) => `${qi(h)} ${SQL_TYPE[types[i]]}`),
-    ];
-    // Colunas do recordset com nomes seguros (k0, k1…), mapeadas para os nomes reais.
-    const recordset = data.headers.map((_, i) => `"k${i}" ${SQL_TYPE[types[i]]}`).join(', ');
-    const insert = `INSERT INTO ${table} (${data.headers.map(qi).join(', ')})
-      SELECT ${data.headers.map((_, i) => `r."k${i}"`).join(', ')}
-        FROM jsonb_to_recordset($1::jsonb) AS r(${recordset})`;
-
+  /** Lê o resto do arquivo e grava em partes; atualiza o andamento da tarefa. */
+  private async runImport(
+    job: ImportJob,
+    src: RowSource,
+    data: Sheet,
+    ended: boolean,
+    plan: ImportPlan,
+    cfg: ImportConfig & { name: string },
+    schema: string,
+    uploadId: string,
+  ) {
+    const columns = [...plan.headers, ...plan.extra.map((e) => e.name)];
+    const types = [...plan.types, ...plan.extra.map((e) => e.type)];
+    const auto = [...plan.auto, ...plan.extra.map(() => false)];
     const invalid: Record<string, number> = {};
-    await this.prisma.$transaction(
-      async (tx) => {
-        await tx.$executeRawUnsafe(`CREATE TABLE ${table} (${defs.join(', ')})`);
-        for (let i = 0; i < data.rows.length; i += BATCH) {
-          const batch = data.rows.slice(i, i + BATCH).map((row) => {
-            const o: Record<string, string | number | null> = {};
-            row.forEach((v, c) => {
-              const r = convert(v, types[c]);
-              if (r.invalid) invalid[data.headers[c]] = (invalid[data.headers[c]] ?? 0) + 1;
-              o[`k${c}`] = r.value;
-            });
-            return o;
-          });
-          await tx.$executeRawUnsafe(insert, JSON.stringify(batch));
-        }
-      },
-      { timeout: 600_000, maxWait: 10_000 },
-    );
+    let unread = 0;
+    let table: string | null = null;
+    let tableName = '';
+    try {
+      tableName = await this.freeTableName(schema, cfg.name);
+      table = qualified(schema, tableName);
+      const defs = [
+        ...(plan.autoId
+          ? [`${qi(plan.autoId)} bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY`]
+          : []),
+        ...columns.map((h, i) => `${qi(h)} ${SQL_TYPE[types[i]]}`),
+      ];
+      await this.prisma.$executeRawUnsafe(`CREATE TABLE ${table} (${defs.join(', ')})`);
 
-    const source = await this.register(
-      schema,
-      tableName,
-      { ...cfg, name, idColumn: cfg.idColumn || autoId!, xColumn, yColumn },
-      userId,
-    );
-    if (unread) invalid['coordenadas não reconhecidas'] = unread;
-    return { source, rows: data.rows.length, schema, tableName, invalid };
+      let batch: Cell[][] = [];
+      const flush = async () => {
+        if (!batch.length) return;
+        // Tipos detectados alargam se a parte trouxer um valor que não cabe.
+        for (let c = 0; c < columns.length; c++) {
+          if (!auto[c]) continue;
+          let t = types[c];
+          for (const r of batch) {
+            t = widenType(t, r[c]);
+            if (t === 'text') break;
+          }
+          if (t !== types[c]) {
+            await this.prisma.$executeRawUnsafe(
+              `ALTER TABLE ${table} ALTER COLUMN ${qi(columns[c])} TYPE ${SQL_TYPE[t]} USING ${qi(columns[c])}::${SQL_TYPE[t]}`,
+            );
+            types[c] = t;
+          }
+        }
+        // Colunas do recordset com nomes seguros (k0, k1…), mapeadas para os nomes reais.
+        const recordset = columns.map((_, i) => `"k${i}" ${SQL_TYPE[types[i]]}`).join(', ');
+        const objects = batch.map((row) => {
+          const o: Record<string, string | number | null> = {};
+          row.forEach((v, c) => {
+            const r = convert(v, types[c]);
+            if (r.invalid) invalid[columns[c]] = (invalid[columns[c]] ?? 0) + 1;
+            o[`k${c}`] = r.value;
+          });
+          return o;
+        });
+        await this.prisma.$executeRawUnsafe(
+          `INSERT INTO ${table} (${columns.map(qi).join(', ')})
+           SELECT ${columns.map((_, i) => `r."k${i}"`).join(', ')}
+             FROM jsonb_to_recordset($1::jsonb) AS r(${recordset})`,
+          JSON.stringify(objects),
+        );
+        job.rows += batch.length;
+        job.percent = src.progress();
+        batch = [];
+        if (job.cancel) throw new ImportCancelled();
+      };
+      const add = (raw: Cell[]) => {
+        const r = fitRow(raw, plan.width);
+        const xy = coordOf(r, plan.at, plan.geographic);
+        if (!xy) unread++;
+        if (plan.plain) {
+          r[plan.at.xi] = xy?.x ?? parseCoordValue(r[plan.at.xi]);
+          r[plan.at.yi] = xy?.y ?? parseCoordValue(r[plan.at.yi]);
+        }
+        if (plan.extra.length) {
+          const ll = plan.convert && xy ? plan.crs.toLatLng(xy.x, xy.y) : null;
+          const point = { xy, ll, utm: ll ? latLngToUtm(ll.lat, ll.lng) : null };
+          for (const e of plan.extra) r.push(e.value(point) as Cell);
+        }
+        batch.push(r);
+      };
+
+      for (const r of data.rows) {
+        add(r);
+        if (batch.length >= BATCH_ROWS) await flush();
+      }
+      if (!ended) {
+        for await (const raw of src.rows) {
+          add(raw);
+          if (batch.length >= BATCH_ROWS) await flush();
+        }
+      }
+      await flush();
+      src.close();
+      job.percent = 1;
+
+      job.phase = 'indexing';
+      const source = await this.register(
+        schema,
+        tableName,
+        {
+          ...cfg,
+          idColumn: cfg.idColumn || plan.autoId!,
+          xColumn: plan.xColumn,
+          yColumn: plan.yColumn,
+        },
+        job.userId,
+      );
+      table = null; // registrada: não apagar mais
+      await this.prisma
+        .$executeRawUnsafe(`ANALYZE ${qualified(schema, tableName)}`)
+        .catch(() => undefined);
+      if (unread) invalid['coordenadas não reconhecidas'] = unread;
+      job.result = { source, rows: job.rows, schema, tableName, invalid };
+      job.phase = 'done';
+    } catch (e) {
+      src.close();
+      if (table)
+        await this.prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS ${table}`).catch(() => undefined);
+      if (e instanceof ImportCancelled) job.phase = 'cancelled';
+      else {
+        job.phase = 'error';
+        job.error = (e as Error).message || 'Erro ao importar';
+        this.logger.error(`Importação ${job.id}: ${job.error}`);
+      }
+    } finally {
+      job.finishedAt = Date.now();
+      if (job.phase === 'done') this.dropUpload(uploadId);
+    }
   }
 
   // ---------------------------------------------------------------- converter coordenadas

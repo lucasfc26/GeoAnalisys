@@ -9,6 +9,8 @@ export type ShortcutId =
   | 'move'
   | 'duplicate'
   | 'remove'
+  | 'undo'
+  | 'redo'
   | 'copy'
   | 'clear'
   | 'edit'
@@ -38,6 +40,8 @@ export const SHORTCUTS: ShortcutDef[] = [
   { id: 'move', group: 'Seleção', label: 'Mover selecionados', key: 'G' },
   { id: 'duplicate', group: 'Seleção', label: 'Duplicar selecionados', key: 'D' },
   { id: 'remove', group: 'Seleção', label: 'Excluir selecionados', key: 'Del' },
+  { id: 'undo', group: 'Seleção', label: 'Desfazer a última ação', key: 'Ctrl+Z' },
+  { id: 'redo', group: 'Seleção', label: 'Refazer a ação desfeita', key: 'Ctrl+Y' },
   { id: 'copy', group: 'Seleção', label: 'Copiar selecionados (colar no Excel)', key: 'Ctrl+C' },
   { id: 'clear', group: 'Seleção', label: 'Limpar seleção / cancelar mover', key: 'Esc' },
   { id: 'edit', group: 'Seleção', label: 'Editar registro aberto', key: 'E' },

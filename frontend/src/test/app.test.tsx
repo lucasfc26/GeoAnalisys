@@ -28,7 +28,7 @@ describe('seleção', () => {
     expect(useAppStore.getState().activeKey).toBe('1|2');
   });
 
-  it('Ctrl+clique adiciona e remove da seleção', () => {
+  it('a seleção múltipla alterna o ponto na seleção', () => {
     const s = useAppStore.getState();
     s.toggleGroup(g(1, 2, ['10']));
     s.toggleGroup(g(3, 4, ['20', '21']));
@@ -47,6 +47,44 @@ describe('seleção', () => {
     useAppStore.getState().setSelection([g(1, 2, ['10', '11']), g(3, 4, ['20'])]);
     useAppStore.getState().removeIds(['11', '20']);
     expect(useAppStore.getState().selection).toEqual({ '1|2': g(1, 2, ['10']) });
+  });
+
+  it('tirar da seleção os demais registros da coordenada abre o que sobrou', () => {
+    useAppStore.getState().setSelection([g(1, 2, ['10', '11'])]);
+    useAppStore.getState().removeIds(['11']);
+    expect(useAppStore.getState().activeRecordId).toBe('10');
+    expect(useAppStore.getState().activeKey).toBe('1|2');
+  });
+
+  it('outras camadas: a nova seleção limpa; tornar uma ativa troca de lugar com a ativa', () => {
+    const s = useAppStore.getState();
+    s.setSource('a');
+    s.setSelection([g(1, 2, ['10'])]);
+    s.setOtherSelection({ b: { '1|2': g(1, 2, ['90']) } });
+    useAppStore.getState().promoteLayer('b', '1|2', '90');
+    let st = useAppStore.getState();
+    expect(st.sourceId).toBe('b');
+    expect(selectedIdsOf(st.selection)).toEqual(['90']);
+    expect(st.activeRecordId).toBe('90');
+    expect(Object.keys(st.otherSelection)).toEqual(['a']);
+    useAppStore.getState().setSelection([g(3, 4, ['20'])]);
+    st = useAppStore.getState();
+    expect(st.otherSelection).toEqual({});
+    useAppStore.getState().setSource(null);
+  });
+
+  it('consultar um limite devolve o clique do mapa para a camada de pontos', () => {
+    const s = useAppStore.getState();
+    s.setActiveBoundary('limite');
+    expect(useAppStore.getState().activeBoundaryId).toBe('limite');
+    expect(useAppStore.getState().panelOpen).toBe(true);
+    s.setBoundarySelection({ layerId: 'limite', index: 2 });
+    expect(useAppStore.getState().boundarySelection).toEqual({ layerId: 'limite', index: 2 });
+    s.setSource('a');
+    const st = useAppStore.getState();
+    expect(st.activeBoundaryId).toBeNull();
+    expect(st.boundarySelection).toBeNull();
+    s.setSource(null);
   });
 });
 

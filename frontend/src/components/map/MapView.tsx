@@ -9,22 +9,29 @@ import { roundBounds, useActiveSource } from '@/hooks/useSourceData';
 import { useDebounce } from '@/hooks/useDebounce';
 import { useLayersData, type LayerRuntime } from '@/hooks/useLayers';
 import { errorMessage } from '@/lib/api';
-import { isAdditive, useMap, useSetMap } from '@/lib/mapContext';
+import { boundaryStore, featureAt } from '@/lib/boundaries';
+import { useMap, useSetMap } from '@/lib/mapContext';
+import { applyGroup, selectionModeOf, type SelectionMode } from '@/lib/selectionMode';
 import { setProjectViewGetter } from '@/lib/project';
 import { pointsService } from '@/services/points';
 import { crsService } from '@/services/sources';
-import { useAppStore } from '@/stores/appStore';
+import { selectedIdsOf, useAppStore } from '@/stores/appStore';
+import { useAssociationReviewStore } from '@/stores/associationReviewStore';
 import { useDuplicatesStore } from '@/stores/duplicatesStore';
+import { useSelectionPreviewStore } from '@/stores/selectionPreviewStore';
 import { useToolListsStore } from '@/stores/toolListsStore';
-import type { Bounds, LatLng, MapCluster } from '@/types';
+import type { Bounds, LatLng, MapCluster, SelectedGroup } from '@/types';
 import { fmtInt, fmtValue } from '@/utils/format';
+import { PX_PER_CM } from '@/utils/geo';
 import { LayersPanel } from '../layers/LayersPanel';
 import { ErrorState } from '../ui/States';
 import { toast } from '../ui/Toaster';
 import { BasemapControl, BoundariesLayer } from './BaseLayers';
 import { DrawingController } from './DrawingController';
 import { AttributeDistancePanel } from './AttributeDistancePanel';
+import { AssociationReviewPanel } from './AssociationReviewPanel';
 import { DuplicatesPanel } from './DuplicatesPanel';
+import { SelectionPreview } from './SelectionPreview';
 import { OutsideBoundaryPanel } from './OutsideBoundaryPanel';
 import { ListModePanel } from './ListModePanel';
 import { MeasureController } from './MeasureController';
@@ -41,6 +48,8 @@ import {
 } from './pointsOverlay';
 import { enableMiddlePan } from './middlePan';
 
+type GroupHit = Extract<Hit, { kind: 'group' }>;
+
 setWorkerUrl(maplibreWorkerUrl);
 
 /** Brasil inteiro na abertura (o enquadramento nos dados vem logo depois). */
@@ -52,9 +61,10 @@ const MAX_ZOOM = 22;
 const POINT_ZOOM = 17;
 
 const HINTS: Partial<Record<string, string>> = {
-  multi: 'Clique nos pontos para adicionar/remover da seleção',
-  rectangle: 'Arraste para desenhar um retângulo (Ctrl/Shift soma à seleção)',
-  polygon: 'Clique para adicionar vértices · duplo clique ou Enter conclui · Esc cancela',
+  multi: 'Clique para adicionar ou remover · Shift soma · Ctrl tira da seleção',
+  rectangle: 'Arraste um retângulo · Shift soma à seleção · Ctrl tira os pontos da marcação',
+  polygon:
+    'Clique para adicionar vértices · duplo clique ou Enter conclui · Shift soma · Ctrl tira · Esc cancela',
   add: 'Clique no mapa para adicionar um ponto',
   measure:
     'Clique para marcar pontos · duplo clique ou Enter conclui · Backspace desfaz · Esc limpa',
@@ -227,9 +237,13 @@ export default function MapView() {
   const viewHidden = useAppStore((s) => s.viewHidden);
   const listWindows = useAppStore((s) => s.listWindows);
   const duplicatesOpen = useDuplicatesStore((s) => s.panelOpen && !!s.result);
+  const reviewOpen = useAssociationReviewStore((s) => s.panelOpen && !!s.result);
+  const previewOpen = useSelectionPreviewStore((s) => s.open);
   const outsideOpen = useToolListsStore((s) => s.outsideOpen && !!s.outside);
   const attrDistOpen = useToolListsStore((s) => s.attrDistOpen && !!s.attrDist);
   const selection = useAppStore((s) => s.selection);
+  const otherSelection = useAppStore((s) => s.otherSelection);
+  const setOtherSelection = useAppStore((s) => s.setOtherSelection);
   const setSelection = useAppStore((s) => s.setSelection);
   const toggleGroup = useAppStore((s) => s.toggleGroup);
   const clearSelection = useAppStore((s) => s.clearSelection);
@@ -245,11 +259,23 @@ export default function MapView() {
   const bounds = useDebounce(rawBounds, fetchDelay);
   const runtimes = useLayersData(bounds);
   const active = runtimes.find((r) => r.layer.sourceId === sourceId);
-  const selectedKeys = useMemo(() => new Set(Object.keys(selection)), [selection]);
+  // Coordenadas selecionadas por camada: a ativa e as outras (clique em "todas as camadas").
+  const selectedKeys = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const [id, groups] of Object.entries(otherSelection))
+      m.set(id, new Set(Object.keys(groups)));
+    if (sourceId) m.set(sourceId, new Set(Object.keys(selection)));
+    return m;
+  }, [sourceId, selection, otherSelection]);
   const [busy, setBusy] = useState(false);
   const overlayRef = useRef<PointsOverlayApi | null>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const pointerRef = useRef(false);
+  const boundaryReq = useRef(0);
+  const activeBoundaryId = useAppStore((s) => s.activeBoundaryId);
+  const boundaryName = useAppStore(
+    (s) => s.boundaries.find((b) => b.id === s.activeBoundaryId)?.name,
+  );
 
   // Cursor, arraste e duplo clique conforme a ferramenta (mover/duplicar e o hover ajustam depois).
   const drawing = tool === 'rectangle' || tool === 'polygon';
@@ -289,8 +315,8 @@ export default function MapView() {
   });
 
   useEffect(() => {
-    overlayRef.current?.setSelected(sourceId, selectedKeys);
-  }, [sourceId, selectedKeys, map]);
+    overlayRef.current?.setSelected(selectedKeys);
+  }, [selectedKeys, map]);
 
   // Coordenada buscada: pisca o local ao chegar.
   const focus = useAppStore((s) => s.focus);
@@ -323,35 +349,77 @@ export default function MapView() {
     };
   }, [map]);
 
-  const onGroupHit = useCallback(
-    async (hit: Extract<Hit, { kind: 'group' }>, additive: boolean) => {
+  /** Registros do ponto clicado (busca no servidor quando o desenho não traz os IDs). */
+  const groupOf = useCallback(
+    async (hit: GroupHit): Promise<SelectedGroup> => {
       const rt = runtimes.find((r) => r.layer.sourceId === hit.layerId);
       const info = groupInfo(hit.prepared, hit.styled, hit.g);
-      let ids = info.ids;
-      if (!ids) {
-        try {
-          setBusy(true);
-          ids = (
-            await pointsService.at(hit.layerId, info.x, info.y, rt?.selectionFilters ?? [], true)
-          ).ids;
-        } catch (err) {
-          toast.error(errorMessage(err));
-          return;
-        } finally {
-          setBusy(false);
-        }
-      }
-      const group = { key: info.key, x: info.x, y: info.y, lat: info.lat, lng: info.lng, ids };
-      if (hit.layerId !== useAppStore.getState().sourceId) {
-        // Clique em outra camada: ela vira a camada ativa (como no QGIS).
-        setSource(hit.layerId);
-        setSelection([group]);
-        return;
-      }
-      if (additive || tool === 'multi') toggleGroup(group);
-      else setSelection([group]);
+      const ids =
+        info.ids ??
+        (await pointsService.at(hit.layerId, info.x, info.y, rt?.selectionFilters ?? [], true)).ids;
+      return { key: info.key, x: info.x, y: info.y, lat: info.lat, lng: info.lng, ids };
     },
-    [runtimes, tool, toggleGroup, setSelection, setSource],
+    [runtimes],
+  );
+
+  /**
+   * Clique em ponto(s): um por camada (de cima para baixo). A camada ativa, se clicada, continua
+   * ativa; senão a de cima passa a ser (como no QGIS). As demais ficam como "outras camadas".
+   * Shift soma; Ctrl tira o ponto clicado. A seleção múltipla, sem modificador, alterna.
+   */
+  const onGroupHits = useCallback(
+    async (hits: GroupHit[], mode: SelectionMode) => {
+      let groups: SelectedGroup[];
+      try {
+        setBusy(true);
+        groups = await Promise.all(hits.map(groupOf));
+      } catch (err) {
+        toast.error(errorMessage(err));
+        return;
+      } finally {
+        setBusy(false);
+      }
+      const activeId = useAppStore.getState().sourceId;
+      const main = Math.max(
+        0,
+        hits.findIndex((h) => h.layerId === activeId),
+      );
+      const group = groups[main];
+      const onActive = hits[main].layerId === activeId;
+      const toggle = tool === 'multi' && mode === 'replace';
+      if (!onActive && (mode === 'replace' || toggle)) {
+        setSource(hits[main].layerId);
+        setSelection([group]);
+      } else if (onActive && mode === 'subtract') {
+        useAppStore.getState().removeIds(group.ids);
+      } else if (onActive && mode === 'add') {
+        setSelection([group], 'add');
+      } else if (onActive && toggle) toggleGroup(group);
+      else if (onActive) setSelection([group]);
+
+      let next = { ...useAppStore.getState().otherSelection };
+      let changed = false;
+      const touchOther = (layerId: string, g: SelectedGroup, how: SelectionMode | 'toggle') => {
+        changed = true;
+        const layer = applyGroup({ ...next[layerId] }, g, how);
+        if (Object.keys(layer).length) next = { ...next, [layerId]: layer };
+        else {
+          next = { ...next };
+          delete next[layerId];
+        }
+      };
+      // Shift/Ctrl num ponto de outra camada mantém a seleção da camada ativa.
+      if (!onActive && (mode === 'add' || mode === 'subtract'))
+        touchOther(hits[main].layerId, group, mode);
+      if (hits.length > 1) {
+        hits.forEach((h, i) => {
+          if (i === main) return;
+          touchOther(h.layerId, groups[i], toggle ? 'toggle' : mode === 'replace' ? 'add' : mode);
+        });
+      }
+      if (changed) setOtherSelection(next);
+    },
+    [groupOf, tool, toggleGroup, setSelection, setSource, setOtherSelection],
   );
 
   const onClusterClick = useCallback(
@@ -366,19 +434,61 @@ export default function MapView() {
   const clickable = !transform && (tool === 'select' || tool === 'multi' || tool === 'pan');
   const noop = (e: MapMouseEvent) => void e;
   const handlers = useRef({ click: noop, move: noop });
+  /** Ponto sob o cursor: em "camada ativa", só nela; senão na camada de cima. */
+  const hitAt = (lat: number, lng: number) => {
+    const s = useAppStore.getState();
+    return (
+      overlayRef.current?.hitTest(lat, lng, s.clickTarget === 'active' ? s.sourceId : undefined) ??
+      null
+    );
+  };
   const nameOf = (id: string) => runtimes.find((r) => r.layer.sourceId === id)?.source?.name ?? '';
   handlers.current = {
     click: (e) => {
       if (!clickable) return;
-      const hit = overlayRef.current?.hitTest(e.lngLat.lat, e.lngLat.lng);
+      const boundaryId = useAppStore.getState().activeBoundaryId;
+      if (boundaryId) {
+        const { lat, lng } = e.lngLat;
+        const req = ++boundaryReq.current;
+        const tol = map
+          ? metersPerCm(worldScaleOf(map.getZoom()), lat) * (12 / PX_PER_CM)
+          : 12;
+        void boundaryStore
+          .get(boundaryId)
+          .then((fc) => {
+            if (req !== boundaryReq.current) return;
+            if (!fc) {
+              toast.error('A geometria deste limite não está mais salva neste computador.');
+              return;
+            }
+            const index = featureAt(fc, lng, lat, tol);
+            useAppStore
+              .getState()
+              .setBoundarySelection(index === null ? null : { layerId: boundaryId, index });
+          })
+          .catch((err) => {
+            if (req === boundaryReq.current) toast.error(errorMessage(err));
+          });
+        return;
+      }
+      const { lat, lng } = e.lngLat;
+      const hit = hitAt(lat, lng);
       if (hit?.kind === 'cluster') onClusterClick(hit.cluster);
-      else if (hit?.kind === 'group') void onGroupHit(hit, isAdditive(e));
-      else if (tool === 'select' && Object.keys(selection).length) clearSelection();
+      else if (hit?.kind === 'group') {
+        const all = useAppStore.getState().clickTarget === 'all';
+        const hits = all ? (overlayRef.current?.hitTestAll(lat, lng) ?? []) : [];
+        void onGroupHits(hits.length ? hits : [hit], selectionModeOf(e.originalEvent));
+      } else if (
+        tool === 'select' &&
+        selectionModeOf(e.originalEvent) === 'replace' &&
+        Object.keys(selection).length
+      )
+        clearSelection();
     },
     move: (e) => {
       const tip = tipRef.current;
       if (!map || !tip) return;
-      const hit = clickable ? overlayRef.current?.hitTest(e.lngLat.lat, e.lngLat.lng) : null;
+      const hit = clickable ? hitAt(e.lngLat.lat, e.lngLat.lng) : null;
       if (clickable && pointerRef.current !== !!hit) {
         pointerRef.current = !!hit;
         map.getCanvas().style.cursor = hit ? 'pointer' : '';
@@ -438,7 +548,7 @@ export default function MapView() {
   }, [map]);
 
   const onPolygon = useCallback(
-    async (polygon: LatLng[], additive: boolean) => {
+    async (polygon: LatLng[], mode: SelectionMode) => {
       if (!sourceId) return;
       setBusy(true);
       try {
@@ -447,13 +557,31 @@ export default function MapView() {
           polygon,
           active?.selectionFilters ?? [],
         );
-        setSelection(
-          res.groups.map(({ key, x, y, lat, lng, ids }) => ({ key, x, y, lat, lng, ids })),
-          additive ? 'add' : 'replace',
-        );
-        if (res.truncated) toast.info('Seleção limitada a 200.000 registros.');
-        else if (!res.count) toast.info('Nenhum ponto da camada ativa na região selecionada.');
-        else toast.success(`${fmtInt(res.count)} registro(s) selecionado(s).`);
+        const groups = res.groups.map(({ key, x, y, lat, lng, ids }) => ({
+          key,
+          x,
+          y,
+          lat,
+          lng,
+          ids,
+        }));
+        if (mode === 'subtract') {
+          const selected = new Set(selectedIdsOf(useAppStore.getState().selection));
+          const removed = groups.reduce(
+            (n, g) => n + g.ids.filter((id) => selected.has(id)).length,
+            0,
+          );
+          if (removed) useAppStore.getState().removeIds(groups.flatMap((g) => g.ids));
+          if (res.truncated) toast.info('Seleção limitada a 200.000 registros.');
+          else if (!res.count) toast.info('Nenhum ponto da camada ativa na região selecionada.');
+          else if (!removed) toast.info('Nenhum dos pontos da região estava selecionado.');
+          else toast.success(`${fmtInt(removed)} registro(s) retirado(s) da seleção.`);
+        } else {
+          setSelection(groups, mode === 'add' ? 'add' : 'replace');
+          if (res.truncated) toast.info('Seleção limitada a 200.000 registros.');
+          else if (!res.count) toast.info('Nenhum ponto da camada ativa na região selecionada.');
+          else toast.success(`${fmtInt(res.count)} registro(s) selecionado(s).`);
+        }
       } catch (err) {
         toast.error(errorMessage(err));
       } finally {
@@ -488,7 +616,10 @@ export default function MapView() {
     [active?.source, openDialog],
   );
 
-  const hint = HINTS[transform ? 'transform' : tool];
+  const hint =
+    activeBoundaryId && clickable
+      ? `Clique em ${boundaryName ?? 'o limite'} para ver os atributos da feição`
+      : HINTS[transform ? 'transform' : tool];
   const failed = runtimes.find((r) => r.layer.visible && r.error && !r.isFetching);
 
   return (
@@ -509,6 +640,7 @@ export default function MapView() {
           sourceId={w.sourceId}
           index={i}
           initialMode={w.mode}
+          initialSeed={w.seed}
         />
       ))}
       {/* Uma janela por F3/clique, cada uma presa à camada em que foi aberta. */}
@@ -522,6 +654,8 @@ export default function MapView() {
         />
       ))}
       {duplicatesOpen && <DuplicatesPanel />}
+      {reviewOpen && <AssociationReviewPanel />}
+      {previewOpen && <SelectionPreview />}
       {outsideOpen && <OutsideBoundaryPanel />}
       {attrDistOpen && <AttributeDistancePanel />}
       <BasemapControl hidden={viewHidden.maps} />

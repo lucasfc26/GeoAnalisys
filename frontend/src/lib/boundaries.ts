@@ -199,6 +199,186 @@ export function featureLabels(fc: GeoCollection): string[] {
   });
 }
 
+const M_PER_DEG = 111_320;
+
+interface Box {
+  minLng: number;
+  minLat: number;
+  maxLng: number;
+  maxLat: number;
+}
+
+const boxesOf = new WeakMap<GeoCollection, (Box | null)[]>();
+
+function walkCoords(coords: unknown, fn: (lng: number, lat: number) => void) {
+  if (!Array.isArray(coords)) return;
+  if (typeof coords[0] === 'number') fn(Number(coords[0]), Number(coords[1]));
+  else for (const c of coords) walkCoords(c, fn);
+}
+
+function boxOf(g: GeoFeature['geometry']): Box | null {
+  let box: Box | null = null;
+  const add = (lng: number, lat: number) => {
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+    if (!box) box = { minLng: lng, maxLng: lng, minLat: lat, maxLat: lat };
+    else {
+      if (lng < box.minLng) box.minLng = lng;
+      if (lng > box.maxLng) box.maxLng = lng;
+      if (lat < box.minLat) box.minLat = lat;
+      if (lat > box.maxLat) box.maxLat = lat;
+    }
+  };
+  if (!g) return null;
+  if (g.type === 'GeometryCollection') {
+    for (const c of g.geometries ?? []) {
+      const b = boxOf(c);
+      if (!b) continue;
+      add(b.minLng, b.minLat);
+      add(b.maxLng, b.maxLat);
+    }
+    return box;
+  }
+  walkCoords(g.coordinates, add);
+  return box;
+}
+
+function featureBoxes(fc: GeoCollection): (Box | null)[] {
+  let boxes = boxesOf.get(fc);
+  if (!boxes) {
+    boxes = fc.features.map((f) => boxOf(f.geometry));
+    boxesOf.set(fc, boxes);
+  }
+  return boxes;
+}
+
+function ringHas(ring: number[][], lng: number, lat: number) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const yi = ring[i][1];
+    const yj = ring[j][1];
+    if (yi > lat !== yj > lat) {
+      const xi = ring[i][0];
+      const xj = ring[j][0];
+      if (lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function polygonHas(coords: number[][][], lng: number, lat: number) {
+  if (!coords[0] || !ringHas(coords[0], lng, lat)) return false;
+  for (let h = 1; h < coords.length; h++) if (ringHas(coords[h], lng, lat)) return false;
+  return true;
+}
+
+function contains(g: GeoFeature['geometry'], lng: number, lat: number): boolean {
+  if (!g) return false;
+  if (g.type === 'GeometryCollection') return (g.geometries ?? []).some((c) => contains(c, lng, lat));
+  if (g.type === 'Polygon') return polygonHas(g.coordinates as number[][][], lng, lat);
+  if (g.type === 'MultiPolygon')
+    return (g.coordinates as number[][][][]).some((p) => polygonHas(p, lng, lat));
+  return false;
+}
+
+function toMeters(lng: number, lat: number, lng0: number, lat0: number) {
+  const cos = Math.cos((lat0 * Math.PI) / 180) || 1e-6;
+  return [(lng - lng0) * M_PER_DEG * cos, (lat - lat0) * M_PER_DEG];
+}
+
+function segDistM(lng: number, lat: number, a: number[], b: number[]) {
+  const [ax, ay] = toMeters(a[0], a[1], lng, lat);
+  const [bx, by] = toMeters(b[0], b[1], lng, lat);
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 === 0 ? 0 : (-ax * dx - ay * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(ax + t * dx, ay + t * dy);
+}
+
+function ringDist(ring: number[][], lng: number, lat: number, closed: boolean) {
+  let best = Infinity;
+  const n = ring.length;
+  const segments = closed ? n : n - 1;
+  for (let i = 0; i < segments; i++) {
+    const a = ring[i];
+    const b = ring[(i + 1) % n];
+    if (a[0] === b[0] && a[1] === b[1]) continue;
+    const d = segDistM(lng, lat, a, b);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function edgeDist(g: GeoFeature['geometry'], lng: number, lat: number): number {
+  if (!g) return Infinity;
+  if (g.type === 'GeometryCollection')
+    return Math.min(Infinity, ...(g.geometries ?? []).map((c) => edgeDist(c, lng, lat)));
+  if (g.type === 'Point') return segDistM(lng, lat, g.coordinates as number[], g.coordinates as number[]);
+  if (g.type === 'MultiPoint')
+    return Math.min(
+      Infinity,
+      ...(g.coordinates as number[][]).map((p) => segDistM(lng, lat, p, p)),
+    );
+  if (g.type === 'LineString') return ringDist(g.coordinates as number[][], lng, lat, false);
+  if (g.type === 'MultiLineString')
+    return Math.min(
+      Infinity,
+      ...(g.coordinates as number[][][]).map((r) => ringDist(r, lng, lat, false)),
+    );
+  if (g.type === 'Polygon')
+    return Math.min(
+      Infinity,
+      ...(g.coordinates as number[][][]).map((r) => ringDist(r, lng, lat, true)),
+    );
+  if (g.type === 'MultiPolygon')
+    return Math.min(
+      Infinity,
+      ...(g.coordinates as number[][][][]).flatMap((p) => p.map((r) => ringDist(r, lng, lat, true))),
+    );
+  return Infinity;
+}
+
+/**
+ * Feição sob o clique: o polígono mais específico que contém o ponto, ou a linha/borda mais
+ * próxima dentro de `toleranceM` metros. null se nenhuma feição alcança o ponto.
+ */
+export function featureAt(
+  fc: GeoCollection,
+  lng: number,
+  lat: number,
+  toleranceM = 0,
+): number | null {
+  const boxes = featureBoxes(fc);
+  const cos = Math.cos((lat * Math.PI) / 180) || 1e-6;
+  const padLat = toleranceM / M_PER_DEG;
+  const padLng = toleranceM / (M_PER_DEG * cos);
+  let areaHit: { index: number; area: number } | null = null;
+  let edgeHit: { index: number; dist: number } | null = null;
+  for (let i = 0; i < fc.features.length; i++) {
+    const box = boxes[i];
+    if (
+      !box ||
+      lng < box.minLng - padLng ||
+      lng > box.maxLng + padLng ||
+      lat < box.minLat - padLat ||
+      lat > box.maxLat + padLat
+    )
+      continue;
+    const geometry = fc.features[i].geometry;
+    if (contains(geometry, lng, lat)) {
+      const area = (box.maxLng - box.minLng) * (box.maxLat - box.minLat);
+      if (!areaHit || area < areaHit.area || (area === areaHit.area && i > areaHit.index))
+        areaHit = { index: i, area };
+      continue;
+    }
+    if (toleranceM <= 0) continue;
+    const dist = edgeDist(geometry, lng, lat);
+    if (dist <= toleranceM && (!edgeHit || dist < edgeHit.dist)) edgeHit = { index: i, dist };
+  }
+  return areaHit?.index ?? edgeHit?.index ?? null;
+}
+
 // ------------------------------------------------------------------ IndexedDB
 
 const DB_NAME = 'geoanalisys-boundaries';

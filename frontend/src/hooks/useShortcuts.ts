@@ -15,6 +15,8 @@ export function useShortcuts(actions: {
   zoom: (d: number) => void;
   edit: () => void;
   remove: () => void;
+  undo: () => void;
+  redo: () => void;
   transform: (mode: TransformMode) => void;
   copy: (sourceId: string, ids: string[]) => void;
 }) {
@@ -75,6 +77,12 @@ export function useShortcuts(actions: {
           break;
         case 'remove':
           actions.remove();
+          break;
+        case 'undo':
+          actions.undo();
+          break;
+        case 'redo':
+          actions.redo();
           break;
         default:
           s.setTool(id);

@@ -10,6 +10,7 @@ import { FloatingPanel } from '../ui/FloatingPanel';
 export function PreviewFrame({
   title,
   url,
+  externalUrl,
   message,
   index,
   onClose,
@@ -18,6 +19,8 @@ export function PreviewFrame({
   title: string;
   /** Link a carregar; sem link, mostra `message` */
   url: string | null;
+  /** Link de "Abrir fora do sistema", quando difere de `url` (ex.: Street View) */
+  externalUrl?: string;
   message: string;
   /** Ordem (lista 1, 2…): janelas deslocadas para não ficarem uma sobre a outra */
   index: number;
@@ -41,7 +44,7 @@ export function PreviewFrame({
       actions={
         url && (
           <a
-            href={url}
+            href={externalUrl ?? url}
             target="_blank"
             rel="noreferrer"
             className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"

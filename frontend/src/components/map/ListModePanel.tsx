@@ -31,6 +31,7 @@ import { toast } from '../ui/Toaster';
 import { metersPerCm, zoomOfScale } from './pointsOverlay';
 import { PreviewFrame } from './PreviewFrame';
 import { PreviewSettings } from './PreviewSettings';
+import { onAnyKeydown } from '@/lib/detachedWindows';
 
 /** Escalas do controle de aproximação (metros por 1 cm de tela). */
 const SCALES = [1, 2, 5, 10, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000];
@@ -284,6 +285,7 @@ export function ListModePanel({
   sourceId,
   index: windowIndex,
   initialMode = 'walk',
+  initialSeed,
 }: {
   windowId: string;
   /** Camada desta janela (fixa, mesmo que a camada ativa mude: o estado da janela é mantido) */
@@ -292,6 +294,8 @@ export function ListModePanel({
   index: number;
   /** Ao localizar: percorrer os valores ou selecionar todos os pontos da lista */
   initialMode?: ListMode;
+  /** Lista já preenchida: localiza sozinha ao abrir */
+  initialSeed?: { column: string; values: string[] };
 }) {
   const closeWindow = useAppStore((s) => s.closeListWindow);
   const setSelection = useAppStore((s) => s.setSelection);
@@ -307,7 +311,13 @@ export function ListModePanel({
   const defaultCol = source?.idColumn || columns[0]?.name || '';
 
   const [mode, setMode] = useState<ListMode>(initialMode);
-  const [lists, setLists] = useState<ListInput[]>([{ id: 1, column: '', text: '' }]);
+  const [lists, setLists] = useState<ListInput[]>([
+    {
+      id: 1,
+      column: initialSeed?.column ?? '',
+      text: initialSeed?.values.join('\n') ?? '',
+    },
+  ]);
   const [results, setResults] = useState<{ column: string; items: Item[] }[] | null>(null);
   const [index, setIndex] = useState(0);
   const [scale, setScale] = useState(DEFAULT_SCALE);
@@ -454,6 +464,15 @@ export function ListModePanel({
     }
   };
 
+  const seeded = useRef(!!initialSeed?.values.length);
+  useEffect(() => {
+    if (!seeded.current) return;
+    seeded.current = false;
+    void load();
+    // A lista inicial já está no estado desta primeira renderização.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Atributos dos pontos do passo atual.
   const rows = useMemo(() => {
     const out: {
@@ -548,8 +567,8 @@ export function ListModePanel({
       else return;
       e.preventDefault();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    // Também nas janelas destacadas (o modo lista pode estar em outro monitor).
+    return onAnyKeydown(onKey);
   }, [windowId, steps.length, index, go]);
 
   const colSelect = (value: string, onChange: (v: string) => void, className = '') => (
@@ -572,7 +591,7 @@ export function ListModePanel({
           const entry = step?.[i] ?? null;
           const id = previewIds[i];
           const rec = id ? byId.get(id) : undefined;
-          const link = rec ? previewUrl(previewCfg, rec.data) : null;
+          const link = rec ? previewUrl(previewCfg, rec.data, rec) : null;
           const message = !entry
             ? 'Sem valor nesta posição.'
             : entry.item.removed
@@ -590,6 +609,7 @@ export function ListModePanel({
               index={windowIndex * results.length + i}
               title={`Preview${multi ? ` · Lista ${i + 1}` : ''}${entry ? ` · ${entry.item.value}` : ''}`}
               url={link && 'url' in link ? link.url : null}
+              externalUrl={link && 'url' in link ? link.external : undefined}
               message={message}
               onClose={() => setPreview(false)}
             />

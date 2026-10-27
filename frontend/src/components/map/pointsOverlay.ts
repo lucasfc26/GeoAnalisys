@@ -399,11 +399,15 @@ export interface Ghost {
 
 export interface PointsOverlayApi {
   setLayers(layers: OverlayLayer[]): void;
-  setSelected(layerId: string | null, keys: Set<string>): void;
+  /** Coordenadas selecionadas por camada (a ativa e, no clique em "todas as camadas", as demais) */
+  setSelected(selected: Map<string, Set<string>>): void;
   setGhost(ghost: Ghost | null): void;
   /** Pisca os pontos (destaque vermelho intermitente por ~2 s), sem selecioná-los. */
   flash(points: LatLng[]): void;
-  hitTest(lat: number, lng: number): Hit | null;
+  /** Ponto ou agrupamento sob o cursor na camada de cima (ou só em `onlyLayer`) */
+  hitTest(lat: number, lng: number, onlyLayer?: string | null): Hit | null;
+  /** Ponto sob o cursor em cada camada (de cima para baixo; ignora agrupamentos) */
+  hitTestAll(lat: number, lng: number): Extract<Hit, { kind: 'group' }>[];
   destroy(): void;
 }
 
@@ -436,8 +440,7 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
     private layers: OverlayLayer[] = [];
     private styledCache = new WeakMap<PreparedLayer, { style: LayerStyle; styled: StyledLayer }>();
     private drawn = new Map<string, DrawBuffer>();
-    private selectedLayer: string | null = null;
-    private selectedKeys = new Set<string>();
+    private selected = new Map<string, Set<string>>();
     private ghost: Ghost | null = null;
     private flashing: { points: LatLng[]; on: boolean } | null = null;
     private flashTimer = 0;
@@ -557,10 +560,12 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
       this.schedule(true);
     }
 
-    setSelected(layerId: string | null, keys: Set<string>) {
-      if (layerId === this.selectedLayer && keys === this.selectedKeys) return;
-      this.selectedLayer = layerId;
-      this.selectedKeys = keys;
+    setSelected(selected: Map<string, Set<string>>) {
+      const same =
+        selected.size === this.selected.size &&
+        [...selected].every(([id, keys]) => this.selected.get(id) === keys);
+      if (same) return;
+      this.selected = selected;
       this.schedule(true);
     }
 
@@ -774,11 +779,12 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
         }
         ctx.globalAlpha = 1;
 
-        // Seleção (somente na camada ativa).
-        if (l.id === this.selectedLayer && this.selectedKeys.size) {
+        // Seleção (camada ativa e, no clique em "todas as camadas", as demais).
+        const selKeys = this.selected.get(l.id);
+        if (selKeys?.size) {
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          for (const key of this.selectedKeys) {
+          for (const key of selKeys) {
             const g = p.keyIndex.get(key);
             if (g === undefined || !st.vis[g]) continue;
             const r = st.radius[g] + 2;
@@ -977,16 +983,17 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
       const showLabels = (l: OverlayLayer) =>
         hasLabels(l.style.label) && zoom >= l.style.label.minZoom && !!l.prepared.recLabel;
 
-      // 1º os selecionados (camada ativa): sempre aparecem, mesmo escondidos pelo nível de detalhe ou
-      // disputando espaço com rótulos de outras camadas.
-      const selLayer = this.layers.find((l) => l.id === this.selectedLayer);
-      if (selLayer && this.selectedKeys.size && showLabels(selLayer)) {
+      // 1º os selecionados: sempre aparecem, mesmo escondidos pelo nível de detalhe ou disputando
+      // espaço com rótulos de outras camadas.
+      for (const selLayer of this.layers) {
+        const selKeys = this.selected.get(selLayer.id);
+        if (!selKeys?.size || !showLabels(selLayer)) continue;
         const p = selLayer.prepared;
         const st = this.styled(selLayer);
         const lab = selLayer.style.label;
         const max = lab.maxPerPoint ?? 1;
         const font = labelStyle(selLayer);
-        for (const key of this.selectedKeys) {
+        for (const key of selKeys) {
           const g = p.keyIndex.get(key);
           if (g === undefined || !st.vis[g]) continue;
           const lines = groupLabelLines(p, st, g, max);
@@ -1005,10 +1012,10 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
         const max = lab.maxPerPoint ?? 1;
         const st = this.styled(l);
         const font = labelStyle(l);
-        const skipSelected = l === selLayer && this.selectedKeys.size > 0;
+        const selKeys = this.selected.get(l.id);
         for (let i = 0; i < buf.n && placed < MAX_LABELS; i++) {
           const g = buf.g[i];
-          if (skipSelected && this.selectedKeys.has(p.key[g])) continue;
+          if (selKeys?.has(p.key[g])) continue;
           const lines = groupLabelLines(p, st, g, max);
           if (!lines.length) continue;
           place(lines, buf.px[i], buf.py[i], buf.r[i], font, lab.size, lab.buffer, !!lab.underline);
@@ -1062,9 +1069,10 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
       ctx.setLineDash([]);
     }
 
-    hitTest(lat: number, lng: number): Hit | null {
+    hitTest(lat: number, lng: number, onlyLayer?: string | null): Hit | null {
       const { px, py } = this.toCanvas(worldX(lng), worldY(lat));
       for (const l of this.layers) {
+        if (onlyLayer !== undefined && l.id !== onlyLayer) continue;
         const buf = this.drawn.get(l.id);
         if (!buf || buf.prepared !== l.prepared) continue;
         for (const c of buf.clusters) {
@@ -1096,15 +1104,25 @@ export function createPointsOverlay(map: MlMap): PointsOverlayApi {
       }
       return null;
     }
+
+    hitTestAll(lat: number, lng: number) {
+      const out: Extract<Hit, { kind: 'group' }>[] = [];
+      for (const l of this.layers) {
+        const hit = this.hitTest(lat, lng, l.id);
+        if (hit?.kind === 'group') out.push(hit);
+      }
+      return out;
+    }
   }
 
   const overlay = new PointsOverlay();
   return {
     setLayers: (l) => overlay.setLayers(l),
-    setSelected: (id, keys) => overlay.setSelected(id, keys),
+    setSelected: (selected) => overlay.setSelected(selected),
     setGhost: (g) => overlay.setGhost(g),
     flash: (points) => overlay.flash(points),
-    hitTest: (lat, lng) => overlay.hitTest(lat, lng),
+    hitTest: (lat, lng, onlyLayer) => overlay.hitTest(lat, lng, onlyLayer),
+    hitTestAll: (lat, lng) => overlay.hitTestAll(lat, lng),
     destroy: () => overlay.destroy(),
   };
 }

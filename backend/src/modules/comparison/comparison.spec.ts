@@ -1,4 +1,4 @@
-import { compareRows, findLookup, indexLookup, mergeCounts, normKey } from './comparison.logic';
+import { compareRows, findLookup, indexLookup, mergeCounts, normKey, sheetName } from './comparison.logic';
 
 describe('normKey', () => {
   it('trata números iguais escritos de formas diferentes como o mesmo valor', () => {
@@ -80,5 +80,15 @@ describe('compareRows', () => {
     ];
     rows.sort(compareRows);
     expect(rows.map((r) => r.keys[1])).toEqual(['60', '70', '250', null]);
+  });
+});
+
+describe('sheetName', () => {
+  it('limpa símbolos proibidos, corta em 31 e não repete o nome', () => {
+    const used = new Set<string>();
+    expect(sheetName('Estimados', used)).toBe('Estimados');
+    expect(sheetName('Relé: Sim?', used)).toBe('Relé Sim');
+    expect(sheetName('Estimados', used)).toBe('Estimados (2)');
+    expect(sheetName('x'.repeat(40), used)).toHaveLength(31);
   });
 });

@@ -38,6 +38,8 @@ export function BoundariesSection({ openMenu }: { openMenu: OpenMenu }) {
   const dropBoundary = useAppStore((s) => s.dropBoundary);
   const openDialog = useAppStore((s) => s.openDialog);
   const focusMap = useAppStore((s) => s.focusMap);
+  const activeBoundaryId = useAppStore((s) => s.activeBoundaryId);
+  const setActiveBoundary = useAppStore((s) => s.setActiveBoundary);
   const inputRef = useRef<HTMLInputElement>(null);
   const { importFiles, loading } = useImportBoundaries();
   /** Limite sendo renomeado (só o nome exibido; o arquivo original não muda). */
@@ -188,6 +190,7 @@ export function BoundariesSection({ openMenu }: { openMenu: OpenMenu }) {
                 'group relative flex items-center gap-1.5 rounded px-1 py-1 hover:bg-slate-50',
                 !editing && 'cursor-grab active:cursor-grabbing',
                 drag === b.id && 'opacity-40',
+                activeBoundaryId === b.id && 'bg-accent-50',
               )}
             >
               <DropMark where={over?.id === b.id ? over.where : null} />
@@ -221,16 +224,26 @@ export function BoundariesSection({ openMenu }: { openMenu: OpenMenu }) {
                   aria-label="Nome do limite"
                 />
               ) : (
-                <span
+                <button
+                  type="button"
                   className={clsx(
-                    'min-w-0 flex-1 truncate text-xs',
-                    b.visible ? 'text-slate-700' : 'text-slate-400 italic',
+                    'min-w-0 flex-1 truncate text-left text-xs',
+                    activeBoundaryId === b.id
+                      ? 'font-semibold text-accent-800 underline decoration-accent-400 underline-offset-2'
+                      : b.visible
+                        ? 'text-slate-700'
+                        : 'text-slate-400 italic',
                   )}
-                  title={`${b.name} — duplo clique para renomear · botão direito: opções`}
+                  title={
+                    activeBoundaryId === b.id
+                      ? `${b.name} — clique no mapa para ver a feição. Clique numa camada de pontos para sair.`
+                      : `${b.name} — clique para consultar as feições no mapa · duplo clique para renomear · botão direito: opções`
+                  }
+                  onClick={() => setActiveBoundary(b.id)}
                   onDoubleClick={() => setEditing({ id: b.id, name: b.name })}
                 >
                   {b.name} <span className="text-slate-400">[{fmtInt(b.features)}]</span>
-                </span>
+                </button>
               )}
             </li>
           ))}

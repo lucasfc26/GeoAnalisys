@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { ToolbarSideContext } from '@/lib/toolbar';
 import { IconButton } from './Button';
@@ -35,6 +35,9 @@ export function HoldMenuButton({
   items,
   onClick,
   menuOnClick,
+  draggable,
+  onDragStart,
+  group,
 }: {
   label: string;
   shortcut?: string;
@@ -46,6 +49,10 @@ export function HoldMenuButton({
   onClick?: () => void;
   /** O clique também abre o menu (botão sem ação padrão) */
   menuOnClick?: boolean;
+  draggable?: boolean;
+  onDragStart?: (e: DragEvent<HTMLButtonElement>) => void;
+  /** Grupo de botões (pastinha): o triângulo fica no canto superior direito */
+  group?: boolean;
 }) {
   const side = useContext(ToolbarSideContext) ?? 'left';
   const [menu, setMenu] = useState<MenuPos | null>(null);
@@ -97,6 +104,8 @@ export function HoldMenuButton({
   return (
     <span ref={anchorRef} className="relative inline-flex select-none [-webkit-touch-callout:none]">
       <IconButton
+        draggable={draggable}
+        onDragStart={onDragStart}
         label={menuOnClick ? label : `${label} · segure para mais opções`}
         shortcut={shortcut}
         active={active}
@@ -130,7 +139,9 @@ export function HoldMenuButton({
         onContextMenu={(e) => {
           e.preventDefault();
           cancelHold();
-          if (!disabled) openMenu();
+          if (disabled) return;
+          e.stopPropagation();
+          openMenu();
         }}
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
@@ -140,13 +151,23 @@ export function HoldMenuButton({
         }}
       >
         {icon}
-        <svg
-          className="pointer-events-none absolute right-0.5 bottom-0.5 size-1.5"
-          viewBox="0 0 6 6"
-          aria-hidden
-        >
-          <path d="M6 0V6H0Z" fill="currentColor" />
-        </svg>
+        {group ? (
+          <svg
+            className="pointer-events-none absolute top-0.5 right-0.5 size-2"
+            viewBox="0 0 6 6"
+            aria-hidden
+          >
+            <path d="M0 0H6V6Z" fill="currentColor" />
+          </svg>
+        ) : (
+          <svg
+            className="pointer-events-none absolute right-0.5 bottom-0.5 size-1.5"
+            viewBox="0 0 6 6"
+            aria-hidden
+          >
+            <path d="M6 0V6H0Z" fill="currentColor" />
+          </svg>
+        )}
       </IconButton>
       {menu &&
         createPortal(

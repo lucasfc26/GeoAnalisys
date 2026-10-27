@@ -9,6 +9,7 @@ import {
   FileSpreadsheet,
   FileText,
   ListChecks,
+  ListOrdered,
   Plus,
   RotateCcw,
   Sigma,
@@ -34,13 +35,15 @@ import {
   type ComparisonSection,
 } from '@/services/comparison';
 import { databaseService, sourcesService } from '@/services/sources';
-import { useAppStore } from '@/stores/appStore';
+import { useAppStore, type ListMode } from '@/stores/appStore';
 import type { FilterDef, FilterOp } from '@/types';
 import { fmtInt } from '@/utils/format';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
 import { Input, Label, Select } from '../ui/Field';
+import { Menu, type MenuEntry } from '../ui/Menu';
 import { toast } from '../ui/Toaster';
+import { ToolTemplateBar } from './ToolTemplateBar';
 
 const SETTINGS_KEY = 'geoanalisys-comparison';
 const MAX_LAYERS = 10;
@@ -970,6 +973,10 @@ export default function ComparisonDialog() {
     request: ComparisonRequest;
     data: ComparisonResult;
   } | null>(null);
+  const [listMenu, setListMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(
+    null,
+  );
+  const [listBusy, setListBusy] = useState(false);
   const run = useMutation({
     mutationFn: (req: ComparisonRequest) => comparisonService.preview(req),
     onSuccess: (data, req) => setResult({ request: req, data }),
@@ -983,7 +990,50 @@ export default function ComparisonDialog() {
   const stale = !!result && !!request && JSON.stringify(result.request) !== JSON.stringify(request);
   const summary = result?.data.summary;
 
+  const openUnmatched = async (anchor: HTMLButtonElement) => {
+    if (!result) return;
+    setListBusy(true);
+    try {
+      const data = await comparisonService.unmatched(result.request);
+      if (!data.layers.length) {
+        toast.info('Nenhum ponto das camadas está nos grupos sem correspondência.');
+        return;
+      }
+      const open = (sourceId: string, column: string, values: string[], mode: ListMode) => {
+        useAppStore.getState().openListWindow(sourceId, mode, { column, values });
+        setListMenu(null);
+        close();
+      };
+      const choices = (sourceId: string, column: string, values: string[], prefix: string) => [
+        {
+          label: `${prefix}Percorrer (${fmtInt(values.length)})`,
+          icon: <ListOrdered className="size-4" />,
+          onSelect: () => open(sourceId, column, values, 'walk'),
+        },
+        {
+          label: `${prefix}Selecionar todos (${fmtInt(values.length)})`,
+          icon: <ListChecks className="size-4" />,
+          onSelect: () => open(sourceId, column, values, 'all'),
+        },
+      ];
+      const items: MenuEntry[] =
+        data.layers.length === 1
+          ? choices(data.layers[0].sourceId, data.layers[0].column, data.layers[0].ids, '')
+          : data.layers.flatMap((layer, i) => [
+              ...(i ? (['separator'] as const) : []),
+              ...choices(layer.sourceId, layer.column, layer.ids, `${layer.label} · `),
+            ]);
+      const r = anchor.getBoundingClientRect();
+      setListMenu({ x: r.left, y: r.bottom + 4, items });
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setListBusy(false);
+    }
+  };
+
   return (
+    <>
     <Dialog
       open
       size="xl"
@@ -1008,6 +1058,12 @@ export default function ComparisonDialog() {
       }
     >
       <div className="space-y-5">
+        <ToolTemplateBar
+          tool="comparison"
+          settings={s}
+          onApply={(saved) => setS({ ...DEFAULTS, ...saved })}
+        />
+
         <section className="space-y-2">
           <p className="text-xs font-medium text-slate-600">
             Camadas{' '}
@@ -1345,6 +1401,17 @@ export default function ComparisonDialog() {
                   </span>
                 )}
               </span>
+              {summary.unmatched > 0 && (
+                <Button
+                  size="sm"
+                  icon={<ListChecks className="size-3.5" />}
+                  loading={listBusy}
+                  title="Abre no modo lista os pontos dos grupos sem correspondência na tabela de apoio"
+                  onClick={(e) => void openUnmatched(e.currentTarget)}
+                >
+                  Sem correspondência
+                </Button>
+              )}
               <Button
                 size="sm"
                 icon={<FileSpreadsheet className="size-3.5" />}
@@ -1374,5 +1441,9 @@ export default function ComparisonDialog() {
         )}
       </div>
     </Dialog>
+    {listMenu && (
+      <Menu x={listMenu.x} y={listMenu.y} items={listMenu.items} onClose={() => setListMenu(null)} />
+    )}
+    </>
   );
 }

@@ -1,10 +1,17 @@
 /**
- * Duplicidades: pares de pontos da mesma camada que podem ser o mesmo ponto coletado duas vezes.
+ * Duplicidades: pares de pontos da camada 1 que podem ser o mesmo ponto cadastrado duas vezes em
+ * relação à camada 2 (referência).
  *
- * Todo par a até `radius` metros é candidato. A pontuação do par soma os pesos das regras atendidas
- * (pesos negativos diminuem a chance): mesma coordenada, atributos iguais/diferentes, associação dos
- * dois pontos à camada de referência e quantidade de pontos sem associação por perto (área nova, onde
- * pontos próximos são esperados). Ficam os pares com pontuação ≥ `minScore` (suspeitos).
+ * Todo par a até `radius` metros é candidato. A pontuação do par soma os pesos dos sinais atendidos
+ * (pesos negativos diminuem a chance):
+ * - associação à referência: os dois disputam o mesmo ponto da referência (um ficou com ele e o
+ *   outro ficou sem par, mas o alcança), cada um tem o seu, só um associado ou nenhum;
+ * - mesma coordenada;
+ * - IDs em sequência (cadastro intencional de dois pontos) ou sem relação (cadastro repetido por
+ *   engano);
+ * - atributos iguais/diferentes (ex.: mesma lâmpada e potência com cadastrador diferente);
+ * - quantidade de pontos sem associação por perto (área nova, onde pontos próximos são esperados).
+ * Ficam os pares com pontuação ≥ `minScore` (suspeitos).
  *
  * Não é 1 para 1: um ponto pode estar em vários pares. Pares ligados por pontos em comum formam um
  * grupo (a área da duplicidade). Com `includeNearby`, os demais pares a até o raio que envolvem um
@@ -21,6 +28,10 @@ export interface DupPoint {
   values: (string | null)[];
   /** Associado a um ponto da camada de referência (null = sem referência) */
   matched: boolean | null;
+  /** Posição do ponto da referência associado (null = sem associação) */
+  refPos?: { lat: number; lng: number } | null;
+  /** ID comparado pela regra de IDs (null = vazio) */
+  idKey?: string | null;
 }
 
 export interface DupRule {
@@ -36,8 +47,20 @@ export interface DupOptions {
   /** Peso de estar na mesma coordenada */
   sameCoordWeight: number;
   rules: DupRule[];
-  /** Pesos pela associação à referência; null = sem referência */
-  reference: { bothMatched: number; oneMatched: number; noneMatched: number } | null;
+  /**
+   * Pesos pela associação à referência; null = sem referência. `shared`: um associado e o outro sem
+   * par, mas a até `maxDistance` m do mesmo ponto da referência (disputam o mesmo ponto); `oneMatched`:
+   * um associado e o outro sem par e sem alcançar o ponto dele.
+   */
+  reference: {
+    maxDistance: number;
+    shared: number;
+    bothMatched: number;
+    oneMatched: number;
+    noneMatched: number;
+  } | null;
+  /** IDs em sequência (diferença até `maxGap` ou um começa com o outro) ou sem relação; null = desligado */
+  ids: { maxGap: number; sequential: number; unrelated: number } | null;
   /** A partir de `minCount` pontos sem associação a até `radius` m do par (sem contar os dois): `weight` */
   density: { radius: number; minCount: number; weight: number } | null;
   minScore: number;
@@ -45,7 +68,10 @@ export interface DupOptions {
   includeNearby?: boolean;
 }
 
-/** Parcela da pontuação: 'same', 'rule:<k>', 'ref:both' | 'ref:one' | 'ref:none', 'density' */
+/**
+ * Parcela da pontuação: 'same', 'rule:<k>', 'ref:shared' | 'ref:both' | 'ref:one' | 'ref:none',
+ * 'id:seq' | 'id:unrelated', 'density'
+ */
 export interface DupPart {
   key: string;
   weight: number;
@@ -134,6 +160,24 @@ function unmatchedNeighbors(pts: DupPoint[], radius: number): number[][] {
 
 const round = (n: number) => Math.round(n * 1e6) / 1e6;
 
+/**
+ * Relação entre dois IDs: "sequential" quando parecem cadastrados de propósito em sequência (números
+ * a até `maxGap` um do outro, ou um começa com o outro: 123456 e 123457 ou 1234562); "unrelated"
+ * quando menos da metade do começo é igual (123456 e 234123: provável cadastro repetido por
+ * engano); null nos demais casos (ou ID vazio/igual).
+ */
+export function idRelation(a: string | null, b: string | null, maxGap: number) {
+  if (a === null || b === null || a === b) return null;
+  if (/^\d+$/.test(a) && /^\d+$/.test(b)) {
+    const gap = BigInt(a) > BigInt(b) ? BigInt(a) - BigInt(b) : BigInt(b) - BigInt(a);
+    if (gap <= BigInt(Math.max(0, Math.floor(maxGap)))) return 'sequential' as const;
+  }
+  if (a.startsWith(b) || b.startsWith(a)) return 'sequential' as const;
+  let common = 0;
+  while (common < a.length && common < b.length && a[common] === b[common]) common++;
+  return common < Math.max(a.length, b.length) / 2 ? ('unrelated' as const) : null;
+}
+
 export function findDuplicates(pts: DupPoint[], opts: DupOptions): DupPair[] {
   if (opts.rules.length > MAX_RULES) throw new Error(`No máximo ${MAX_RULES} regras de atributo`);
   if (!(opts.radius > 0)) return [];
@@ -144,7 +188,8 @@ export function findDuplicates(pts: DupPoint[], opts: DupOptions): DupPair[] {
     const q = pts[j];
     const sameCoord = p.coordKey !== null && p.coordKey === q.coordKey;
     const parts: DupPart[] = [];
-    if (sameCoord && opts.sameCoordWeight) parts.push({ key: 'same', weight: opts.sameCoordWeight });
+    if (sameCoord && opts.sameCoordWeight)
+      parts.push({ key: 'same', weight: opts.sameCoordWeight });
     opts.rules.forEach((r, k) => {
       if (r.scope === 'sameCoord' && !sameCoord) return;
       const a = p.values[k];
@@ -153,14 +198,30 @@ export function findDuplicates(pts: DupPoint[], opts: DupOptions): DupPair[] {
       if ((r.mode === 'equal') === (a === b)) parts.push({ key: `rule:${k}`, weight: r.weight });
     });
     if (opts.reference && p.matched !== null && q.matched !== null) {
+      const ref = opts.reference;
       const n = Number(p.matched) + Number(q.matched);
-      const [key, weight] =
-        n === 2
-          ? ['ref:both', opts.reference.bothMatched]
-          : n === 1
-            ? ['ref:one', opts.reference.oneMatched]
-            : ['ref:none', opts.reference.noneMatched];
+      let key: string;
+      let weight: number;
+      if (n === 2) [key, weight] = ['ref:both', ref.bothMatched];
+      else if (n === 0) [key, weight] = ['ref:none', ref.noneMatched];
+      else {
+        // O sem par alcança o ponto da referência que ficou com o outro: disputam o mesmo ponto.
+        const [hit, other] = p.matched ? [p, q] : [q, p];
+        const pos = hit.refPos;
+        const shared =
+          !!pos &&
+          hasCoords(other) &&
+          haversine(other.lat!, other.lng!, pos.lat, pos.lng) <= ref.maxDistance;
+        [key, weight] = shared ? ['ref:shared', ref.shared] : ['ref:one', ref.oneMatched];
+      }
       if (weight) parts.push({ key, weight });
+    }
+    if (opts.ids) {
+      const rel = idRelation(p.idKey ?? null, q.idKey ?? null, opts.ids.maxGap);
+      if (rel === 'sequential' && opts.ids.sequential)
+        parts.push({ key: 'id:seq', weight: opts.ids.sequential });
+      if (rel === 'unrelated' && opts.ids.unrelated)
+        parts.push({ key: 'id:unrelated', weight: opts.ids.unrelated });
     }
     let nearbyUnmatched: number | null = null;
     if (near && opts.density) {
@@ -251,4 +312,3 @@ function assignGroups(pairs: DupPair[], n: number): Int32Array {
   }
   return groupOf;
 }
-

@@ -13,13 +13,20 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useMemo } from 'react';
-import { useActiveSource, useSelectedIds, useSourceSchema } from '@/hooks/useSourceData';
+import {
+  useActiveSource,
+  useSelectedIds,
+  useSourceSchema,
+  useSources,
+} from '@/hooks/useSourceData';
+import { layerName } from '@/lib/layers';
 import { pointsService } from '@/services/points';
-import { useAppStore } from '@/stores/appStore';
+import { selectedIdsOf, useAppStore } from '@/stores/appStore';
 import type { CrsDef, SelectedGroup } from '@/types';
 import { categoryColor, fmtInt, fmtValue, isUrl } from '@/utils/format';
 import { Button } from '../ui/Button';
 import { EmptyState, ErrorState, Skeleton } from '../ui/States';
+import { BoundaryDetails } from './BoundaryDetails';
 import { CoordinateGrid } from './CoordinateGrid';
 import { RecordDetails } from './RecordDetails';
 import { RecordList, type RecordItem } from './RecordList';
@@ -66,6 +73,7 @@ function GroupView({
 }) {
   const activeRecordId = useAppStore((s) => s.activeRecordId);
   const openRecord = useAppStore((s) => s.openRecord);
+  const removeIds = useAppStore((s) => s.removeIds);
   const primaryIds = useAppStore((s) => s.primaryIds);
   const items = useMemo(() => itemsFor([group], primaryIds), [group, primaryIds]);
   const index = activeRecordId ? group.ids.indexOf(activeRecordId) : -1;
@@ -114,6 +122,7 @@ function GroupView({
             activeId={activeRecordId}
             maxHeight={index >= 0 ? 180 : 420}
             onOpen={(id) => openRecord(group.key, id)}
+            onRemove={(id) => removeIds([id])}
           />
         </div>
       )}
@@ -137,6 +146,64 @@ function GroupView({
   );
 }
 
+/**
+ * Pontos de outras camadas selecionados junto (clique em "todas as camadas"). Abrir um registro
+ * torna a camada dele a ativa, mantendo a seleção das demais.
+ */
+function OtherLayers() {
+  const other = useAppStore((s) => s.otherSelection);
+  const layers = useAppStore((s) => s.layers);
+  const promoteLayer = useAppStore((s) => s.promoteLayer);
+  const removeOtherIds = useAppStore((s) => s.removeOtherIds);
+  const sources = useSources();
+  const entries = useMemo(
+    () =>
+      Object.entries(other).map(([id, groups]) => {
+        const keyById = new Map<string, string>();
+        for (const g of Object.values(groups)) for (const rid of g.ids) keyById.set(rid, g.key);
+        return { id, ids: selectedIdsOf(groups), keyById };
+      }),
+    [other],
+  );
+  if (!entries.length) return null;
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+          Outras camadas
+        </h3>
+        <p className="text-[11px] text-slate-500">
+          Abra um registro para tornar a camada dele a ativa (a seleção das demais é mantida).
+        </p>
+      </div>
+      {entries.map(({ id, ids, keyById }) => {
+        const src = sources.data?.find((s) => s.id === id);
+        return (
+          <div key={id}>
+            <p className="mb-1.5 text-xs font-medium text-slate-700">
+              <Layers className="mr-1 inline size-3.5 text-amber-500" />
+              {layerName(
+                layers.find((l) => l.sourceId === id),
+                src,
+              )}{' '}
+              · <b>{fmtInt(ids.length)}</b>
+            </p>
+            <RecordList
+              sourceId={id}
+              ids={ids}
+              idLabel={src?.idColumn ?? 'ID'}
+              activeId={null}
+              maxHeight={180}
+              onOpen={(rid) => promoteLayer(id, keyById.get(rid) ?? null, rid)}
+              onRemove={(rid) => removeOtherIds(id, [rid])}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Vários pontos selecionados: resumo, ações em massa e lista. */
 function MultiView({
   sourceId,
@@ -156,6 +223,7 @@ function MultiView({
   );
   const openDialog = useAppStore((s) => s.openDialog);
   const openRecord = useAppStore((s) => s.openRecord);
+  const removeIds = useAppStore((s) => s.removeIds);
   const groupCount = Object.keys(selection).length;
   const schema = useSourceSchema(sourceId);
   const allColumns = useMemo(
@@ -330,6 +398,7 @@ function MultiView({
           idLabel={idLabel}
           activeId={null}
           onOpen={(id) => openRecord(keyById.get(id) ?? null, id)}
+          onRemove={(id) => removeIds([id])}
         />
       </div>
     </div>
@@ -343,8 +412,12 @@ export function DataPanel() {
   const activeRecordId = useAppStore((s) => s.activeRecordId);
   const openRecord = useAppStore((s) => s.openRecord);
   const openDialog = useAppStore((s) => s.openDialog);
+  const hasOthers = useAppStore((s) => Object.keys(s.otherSelection).length > 0);
   const keys = Object.keys(selection);
   const crs = useSourceSchema(sourceId).data?.crs;
+  const activeBoundaryId = useAppStore((s) => s.activeBoundaryId);
+
+  if (activeBoundaryId) return <BoundaryDetails layerId={activeBoundaryId} />;
 
   if (sources.isLoading) {
     return (
@@ -364,12 +437,19 @@ export function DataPanel() {
       </EmptyState>
     );
   }
+  if (!keys.length && hasOthers) {
+    return (
+      <div className="p-4">
+        <OtherLayers />
+      </div>
+    );
+  }
   if (!keys.length) {
     return (
       <EmptyState icon={<MousePointerClick className="size-10" />} title="Nenhum ponto selecionado">
         <ul className="mt-2 space-y-1 text-left text-xs">
           <li>• Clique em um ponto para ver os dados</li>
-          <li>• Ctrl + clique para seleção múltipla</li>
+          <li>• Shift + seleção soma os pontos; Ctrl + seleção tira os pontos da marcação</li>
           <li>• Use Retângulo ou Polígono para selecionar uma região</li>
           <li>• Pontos com número indicam registros sobrepostos</li>
         </ul>
@@ -394,38 +474,46 @@ export function DataPanel() {
         ) : (
           <RecordDetails sourceId={sourceId} id={activeRecordId} />
         )}
+        <OtherLayers />
       </div>
     );
   }
 
   if (keys.length === 1) {
     return (
-      <div className="p-4">
+      <div className="space-y-4 p-4">
         <GroupView
           sourceId={sourceId}
           group={selection[keys[0]]}
           crs={crs}
           idLabel={source.idColumn}
         />
+        <OtherLayers />
       </div>
     );
   }
 
   return (
-    <div className="p-4">
+    <div className="space-y-4 p-4">
       <MultiView
         sourceId={sourceId}
         categoryColumn={source.categoryColumn}
         idLabel={source.idColumn}
       />
+      <OtherLayers />
     </div>
   );
 }
 
 export function PanelTitle() {
   const selection = useAppStore((s) => s.selection);
+  const activeBoundaryId = useAppStore((s) => s.activeBoundaryId);
+  const boundaryName = useAppStore(
+    (s) => s.boundaries.find((b) => b.id === s.activeBoundaryId)?.name,
+  );
   const ids = useSelectedIds();
   const n = Object.keys(selection).length;
+  if (activeBoundaryId) return <>{boundaryName ?? 'Limite'}</>;
   if (!n) return <>Informações</>;
   if (n === 1)
     return <>{ids.length > 1 ? `${ids.length} registros na coordenada` : 'Ponto selecionado'}</>;

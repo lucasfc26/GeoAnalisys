@@ -190,3 +190,37 @@ export function BasemapAboutDialog({ id, onClose }: { id: string; onClose: () =>
     </Dialog>
   );
 }
+
+/** Confirma a remoção de um mapa de fundo adicionado por URL (`id` = "xyz:<id>"). */
+export function BasemapRemoveDialog({ id, onClose }: { id: string; onClose: () => void }) {
+  const custom = useAppStore((s) => s.customBasemaps);
+  const removeCustomBasemap = useAppStore((s) => s.removeCustomBasemap);
+  const def = resolveBasemap(id, custom);
+  return (
+    <Dialog
+      open
+      size="sm"
+      title="Remover mapa de fundo"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancelar</Button>
+          <Button
+            variant="danger"
+            onClick={() => {
+              removeCustomBasemap(id.slice(4));
+              onClose();
+            }}
+          >
+            Remover mapa
+          </Button>
+        </>
+      }
+    >
+      <p className="text-sm text-slate-700">
+        Remover o mapa <span className="font-semibold">{def.label}</span> da lista? Para usá-lo de
+        novo, será preciso adicionar o link (URL) outra vez.
+      </p>
+    </Dialog>
+  );
+}

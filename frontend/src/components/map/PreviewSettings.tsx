@@ -1,7 +1,7 @@
 import type { PreviewConfig } from '@/lib/listPreview';
 import type { ColumnMeta } from '@/types';
 
-/** Escolha do link do preview: atributo que já contém o link, ou modelo com {atributo}. */
+/** Escolha do link do preview: atributo que já contém o link, modelo com {atributo} ou Street View. */
 export function PreviewSettings({
   name,
   columns,
@@ -79,6 +79,16 @@ export function PreviewSettings({
           </p>
         </>
       )}
+      <label className="flex items-center gap-2">
+        <input
+          type="radio"
+          name={name}
+          checked={cfg.mode === 'streetview'}
+          onChange={() => onChange({ mode: 'streetview' })}
+          className="accent-accent-600"
+        />
+        <span>Street View na coordenada do ponto</span>
+      </label>
     </div>
   );
 }

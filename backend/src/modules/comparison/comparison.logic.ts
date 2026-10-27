@@ -75,6 +75,21 @@ export function findLookup(
 
 const collator = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
 
+const INVALID_SHEET = /[\\/*?:[\]]/g;
+
+/** Nome de aba do Excel (31 caracteres, sem os símbolos proibidos, único sem diferenciar maiúsculas). */
+export function sheetName(title: string, used: Set<string>): string {
+  const base = title.replace(INVALID_SHEET, ' ').replace(/\s+/g, ' ').trim() || 'Bloco';
+  let name = base.slice(0, 31);
+  let n = 2;
+  while (used.has(name.toLowerCase())) {
+    const suffix = ` (${n++})`;
+    name = `${base.slice(0, Math.max(0, 31 - suffix.length))}${suffix}`;
+  }
+  used.add(name.toLowerCase());
+  return name;
+}
+
 /** Ordena pela descrição e depois pelos valores do grupo (números em ordem numérica, vazios no fim). */
 export function compareRows(
   a: { label: string; keys: (string | null)[] },

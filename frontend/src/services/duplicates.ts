@@ -22,12 +22,19 @@ export interface DuplicatesRequest {
     sourceId: string;
     filters: FilterDef[];
     maxDistance: number;
+    /** Um associado e o outro sem par, mas alcançando o mesmo ponto da referência */
+    sharedMatched: number;
     bothMatched: number;
     oneMatched: number;
     noneMatched: number;
   } | null;
   /** Pontos sem associação perto do par (precisa da referência); null = desligado */
   density: { radius: number; minCount: number; weight: number } | null;
+  /**
+   * IDs em sequência (diferença até `maxGap` ou um começa com o outro) ou sem relação; `column`
+   * null = ID da camada; null = desligado
+   */
+  ids: { column: string | null; maxGap: number; sequential: number; unrelated: number } | null;
   minScore: number;
   /** Também lista os outros pares a até o raio dos pontos suspeitos (abaixo da mínima) */
   includeNearby: boolean;

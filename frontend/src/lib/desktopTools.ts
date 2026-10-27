@@ -1,5 +1,6 @@
-import { isToolbarSide, type ToolbarSide } from '@/lib/toolbar';
-import { useAppStore, type ViewHidden, type ViewPart } from '@/stores/appStore';
+import { isToolbarSide } from '@/lib/toolbar';
+import { layoutButtonState, normalizeToolbarLayout } from '@/lib/toolbarLayout';
+import { useAppStore, type ViewPart } from '@/stores/appStore';
 
 const PARTS: ViewPart[] = ['layers', 'maps', 'info'];
 
@@ -24,13 +25,26 @@ export function initDesktopTools() {
     if ((PARTS as string[]).includes(part)) useAppStore.getState().setViewHidden(part as ViewPart);
     const side = part.startsWith('toolbar:') ? part.slice('toolbar:'.length) : null;
     if (isToolbarSide(side)) useAppStore.getState().setToolbarSide(side);
+    if (part.startsWith('button:'))
+      useAppStore.getState().setToolbarButtonShown(part.slice('button:'.length));
   });
-  const report = (h: ViewHidden, toolbar: ToolbarSide) =>
-    view.state({ layers: !h.layers, maps: !h.maps, info: !h.info, toolbar });
-  const st = useAppStore.getState();
-  report(st.viewHidden, st.toolbarSide);
+  const report = () => {
+    const s = useAppStore.getState();
+    view.state({
+      layers: !s.viewHidden.layers,
+      maps: !s.viewHidden.maps,
+      info: !s.viewHidden.info,
+      toolbar: s.toolbarSide,
+      buttons: layoutButtonState(normalizeToolbarLayout(s.toolbarLayout, s.toolbarSide)),
+    });
+  };
+  report();
   useAppStore.subscribe((s, prev) => {
-    if (s.viewHidden !== prev.viewHidden || s.toolbarSide !== prev.toolbarSide)
-      report(s.viewHidden, s.toolbarSide);
+    if (
+      s.viewHidden !== prev.viewHidden ||
+      s.toolbarSide !== prev.toolbarSide ||
+      s.toolbarLayout !== prev.toolbarLayout
+    )
+      report();
   });
 }

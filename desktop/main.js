@@ -9,7 +9,7 @@
  * configurações. O sistema (janela principal) monta e aplica o conteúdo; aqui ficam os diálogos de
  * arquivo, a leitura/gravação no disco e a lista de recentes.
  */
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, safeStorage, screen, session, shell } = require('electron');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -28,7 +28,7 @@ let started = false;
 /** Título da janela principal sem o projeto: "GeoAnalisys — banco (usuário@servidor)" */
 let mainTitle = 'GeoAnalisys';
 /** Exibir: partes da tela visíveis no sistema (o sistema informa; o menu mostra a marca) */
-let viewState = { layers: true, maps: true, info: true, toolbar: 'left' };
+let viewState = { layers: true, maps: true, info: true, toolbar: 'left', buttons: [] };
 
 // ------------------------------------------------------------------ nome antigo (Censo GIS)
 
@@ -281,6 +281,29 @@ function openConnectWindow() {
   });
 }
 
+/**
+ * Posição do painel destacado (left/top/width/height pedidos pelo sistema), ajustada para caber
+ * inteira no monitor onde foi solto (solto na borda da tela, ficaria metade para fora).
+ */
+function panelBounds(features) {
+  const f = Object.fromEntries(
+    features.split(',').map((kv) => {
+      const [k, v] = kv.split('=');
+      return [k.trim(), Number(v)];
+    }),
+  );
+  if (![f.left, f.top, f.width, f.height].every(Number.isFinite)) return {};
+  const area = screen.getDisplayNearestPoint({ x: Math.round(f.left), y: Math.round(f.top) }).workArea;
+  const width = Math.min(f.width, area.width);
+  const height = Math.min(f.height, area.height);
+  return {
+    x: Math.round(Math.min(Math.max(f.left, area.x), area.x + area.width - width)),
+    y: Math.round(Math.min(Math.max(f.top, area.y), area.y + area.height - height)),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
 function openMainWindow(origin, c) {
   mainTitle = `GeoAnalisys — ${c.database} (${c.user}@${c.host})`;
   mainWin = new BrowserWindow({
@@ -303,9 +326,31 @@ function openMainWindow(origin, c) {
   // O título do sistema não substitui o do programa (mostra o banco em uso).
   mainWin.on('page-title-updated', (e) => e.preventDefault());
   // Links externos (Street View, links dos registros) abrem no navegador padrão.
-  mainWin.webContents.setWindowOpenHandler(({ url }) => {
+  mainWin.webContents.setWindowOpenHandler(({ url, frameName, features }) => {
+    // Painéis flutuantes destacados em janela própria (outro monitor): página vazia que o
+    // React da janela principal preenche.
+    if (url === 'about:blank' && frameName.startsWith('geoanalisys-panel-')) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          icon: ICON,
+          autoHideMenuBar: true,
+          minWidth: 320,
+          minHeight: 200,
+          ...panelBounds(features),
+        },
+      };
+    }
     if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+  // Links clicados dentro de um painel destacado abrem no navegador, como na janela principal.
+  mainWin.webContents.on('did-create-window', (child) => {
+    child.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) shell.openExternal(url);
+      return { action: 'deny' };
+    });
+    child.webContents.on('will-navigate', (e) => e.preventDefault());
   });
   mainWin.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith(origin)) {
@@ -394,6 +439,16 @@ function buildMenu() {
             enabled: hasMain,
             click: () => mainWin?.webContents.send('view:toggle', part),
           })),
+          {
+            label: 'Painel',
+            enabled: hasMain && (viewState.buttons?.length ?? 0) > 0,
+            submenu: (viewState.buttons ?? []).map((b) => ({
+              label: b.label,
+              type: 'checkbox',
+              checked: !!b.visible,
+              click: () => mainWin?.webContents.send('view:toggle', `button:${b.id}`),
+            })),
+          },
           {
             label: 'Barra de ferramentas',
             enabled: hasMain,

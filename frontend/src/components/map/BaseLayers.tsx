@@ -1,4 +1,4 @@
-import type { GeoJSONSourceSpecification, Map as MlMap } from 'maplibre-gl';
+import type { GeoJSONSource, GeoJSONSourceSpecification, Map as MlMap } from 'maplibre-gl';
 import clsx from 'clsx';
 import {
   Check,
@@ -28,7 +28,7 @@ import { useMap } from '@/lib/mapContext';
 import { useAppStore } from '@/stores/appStore';
 import { Button } from '../ui/Button';
 import { Menu, type MenuEntry } from '../ui/Menu';
-import { BasemapAboutDialog, BasemapLinkDialog } from './BasemapDialogs';
+import { BasemapAboutDialog, BasemapLinkDialog, BasemapRemoveDialog } from './BasemapDialogs';
 
 const BASE = 'basemap';
 const OVERLAY = 'basemap-overlay';
@@ -174,14 +174,15 @@ export function BasemapPicker({
   const setBasemapOrder = useAppStore((s) => s.setBasemapOrder);
   const setBasemapName = useAppStore((s) => s.setBasemapName);
   const updateCustomBasemap = useAppStore((s) => s.updateCustomBasemap);
-  const removeCustomBasemap = useAppStore((s) => s.removeCustomBasemap);
   const [open, setOpen] = useState(false);
   const [drag, setDrag] = useState<string | null>(null);
   const [over, setOver] = useState<{ id: string; where: 'before' | 'after' } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null);
   /** Fundo sendo renomeado na lista */
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<{ kind: 'link' | 'about'; id: string } | null>(null);
+  const [dialog, setDialog] = useState<{ kind: 'link' | 'about' | 'remove'; id: string } | null>(
+    null,
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   const items = useMemo(() => orderedBasemaps(order, custom, names), [order, custom, names]);
 
@@ -235,10 +236,10 @@ export function BasemapPicker({
         ? [
             'separator' as const,
             {
-              label: 'Remover mapa',
+              label: 'Remover mapa…',
               icon: <X className="size-3.5" />,
               danger: true,
-              onSelect: () => removeCustomBasemap(b.id.slice(4)),
+              onSelect: () => setDialog({ kind: 'remove', id: b.id }),
             },
           ]
         : []),
@@ -382,6 +383,9 @@ export function BasemapPicker({
       {dialog?.kind === 'about' && (
         <BasemapAboutDialog id={dialog.id} onClose={() => setDialog(null)} />
       )}
+      {dialog?.kind === 'remove' && (
+        <BasemapRemoveDialog id={dialog.id} onClose={() => setDialog(null)} />
+      )}
     </div>
   );
 }
@@ -426,11 +430,9 @@ export function BasemapControl({ hidden = false }: { hidden?: boolean }) {
   const map = useMap();
   const basemap = useAppStore((s) => s.basemap);
   const custom = useAppStore((s) => s.customBasemaps);
-  const removeCustomBasemap = useAppStore((s) => s.removeCustomBasemap);
   const names = useAppStore((s) => s.basemapNames);
   const [adding, setAdding] = useState(false);
   const def = useMemo(() => resolveBasemap(basemap, custom), [basemap, custom]);
-  const customId = def.id.startsWith('xyz:') ? def.id.slice(4) : null;
   const applied = useRef<{ map: MlMap; key: string } | null>(null);
 
   useEffect(() => {
@@ -453,28 +455,15 @@ export function BasemapControl({ hidden = false }: { hidden?: boolean }) {
           label={names[def.id] || def.label}
           onAdd={() => setAdding(true)}
         />
-        {customId && (
-          <button
-            type="button"
-            onClick={() => removeCustomBasemap(customId)}
-            className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-red-600"
-            title="Remover este mapa de fundo"
-            aria-label="Remover este mapa de fundo"
-          >
-            <X className="size-3.5" />
-          </button>
-        )}
-        {!customId && (
-          <button
-            type="button"
-            onClick={() => setAdding(true)}
-            className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-            title="Adicionar mapa por URL (XYZ)"
-            aria-label="Adicionar mapa por URL (XYZ)"
-          >
-            <Plus className="size-3.5" />
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+          title="Adicionar mapa por URL (XYZ)"
+          aria-label="Adicionar mapa por URL (XYZ)"
+        >
+          <Plus className="size-3.5" />
+        </button>
       </div>
       {adding && <AddBasemapForm onClose={() => setAdding(false)} />}
     </>
@@ -537,6 +526,77 @@ export function BoundariesLayer() {
     }
     reorder();
   }, [map, boundaries]);
+
+  const picked = useAppStore((s) => s.boundarySelection);
+  const pickedLayer = useAppStore((s) =>
+    s.boundaries.find((b) => b.id === s.boundarySelection?.layerId),
+  );
+  useEffect(() => {
+    if (!map) return;
+    const srcId = 'boundary-hit';
+    const fillId = 'boundary-hit-fill';
+    const lineId = 'boundary-hit-line';
+    const clear = () => {
+      if (map.getLayer(fillId)) map.removeLayer(fillId);
+      if (map.getLayer(lineId)) map.removeLayer(lineId);
+      if (map.getSource(srcId)) map.removeSource(srcId);
+    };
+    if (!picked || !pickedLayer?.visible) {
+      clear();
+      return;
+    }
+    let cancelled = false;
+    void boundaryStore.get(picked.layerId).then((data) => {
+      if (cancelled) return;
+      const feature = data?.features[picked.index];
+      if (!feature?.geometry) {
+        clear();
+        return;
+      }
+      const collection = {
+        type: 'FeatureCollection' as const,
+        features: [{ ...feature, properties: feature.properties ?? {} }],
+      } as GeoJSON.FeatureCollection;
+      const before = map.getStyle().layers.find((l) => l.id.startsWith('tool-'))?.id;
+      const src = map.getSource(srcId) as GeoJSONSource | undefined;
+      if (src) src.setData(collection);
+      else map.addSource(srcId, { type: 'geojson', data: collection });
+      if (!map.getLayer(fillId)) {
+        map.addLayer(
+          {
+            id: fillId,
+            type: 'fill',
+            source: srcId,
+            paint: { 'fill-color': pickedLayer.color, 'fill-opacity': 0.22 },
+          },
+          before,
+        );
+      } else {
+        map.setPaintProperty(fillId, 'fill-color', pickedLayer.color);
+      }
+      if (!map.getLayer(lineId)) {
+        map.addLayer(
+          {
+            id: lineId,
+            type: 'line',
+            source: srcId,
+            paint: {
+              'line-color': pickedLayer.color,
+              'line-width': Math.max(pickedLayer.width + 1, 3),
+            },
+            layout: { 'line-join': 'round' },
+          },
+          before,
+        );
+      } else {
+        map.setPaintProperty(lineId, 'line-color', pickedLayer.color);
+        map.setPaintProperty(lineId, 'line-width', Math.max(pickedLayer.width + 1, 3));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [map, picked, pickedLayer]);
 
   return null;
 }

@@ -15,6 +15,7 @@ import { fmtInt } from '@/utils/format';
 import { PX_PER_CM, fmtDistance } from '@/utils/geo';
 import { Button } from '../ui/Button';
 import { FloatingPanel } from '../ui/FloatingPanel';
+import { findElementById } from '@/lib/detachedWindows';
 
 /** Motivo sugerido ao excluir um registro pela lista (pode ser reescrito) */
 const DELETE_OBSERVATION = 'Removido: Fora do limite';
@@ -39,7 +40,7 @@ export function OutsideBoundaryPanel() {
   const show = (k: number) => {
     setCurrent(k);
     selectPoints(sourceId, [points[k]]);
-    document.getElementById(`out-pt-${k}`)?.scrollIntoView({ block: 'nearest' });
+    findElementById(`out-pt-${k}`)?.scrollIntoView({ block: 'nearest' });
   };
 
   return (

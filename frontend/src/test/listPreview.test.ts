@@ -44,6 +44,17 @@ describe('preview do modo lista', () => {
     expect(r).toEqual({ error: 'Atributo inexistente no link: nao_existe.' });
   });
 
+  it('Street View usa a coordenada do ponto', () => {
+    const cfg = { mode: 'streetview', column: '', template: '' } as const;
+    expect(previewUrl(cfg, data, { lat: -23.5, lng: -46.6 })).toEqual({
+      url: 'https://maps.google.com/maps?layer=c&cbll=-23.5,-46.6&cbp=11,0,0,0,0&output=svembed',
+      external: 'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=-23.5,-46.6',
+    });
+    expect(previewUrl(cfg, data, { lat: null, lng: null })).toEqual({
+      error: 'O ponto não tem coordenadas.',
+    });
+  });
+
   it('lista os atributos citados no modelo', () => {
     expect(templateColumns('https://s.com/{ID}/{ tipo }')).toEqual(['ID', 'tipo']);
   });

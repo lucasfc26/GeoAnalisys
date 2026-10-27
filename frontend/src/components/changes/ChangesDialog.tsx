@@ -4,6 +4,8 @@ import {
   Download,
   Eraser,
   FileUp,
+  FilterX,
+  MapPin,
   MessageSquareText,
   Pencil,
   RefreshCw,
@@ -14,10 +16,12 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { errorMessage } from '@/lib/api';
+import { selectPoints, type ToolPoint } from '@/lib/selectPoints';
 import { changesService, type ChangeAction, type ChangeRow } from '@/services/changes';
+import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
 import { useProjectStore } from '@/stores/projectStore';
-import { changeObservation, fmtChangeList } from '@/utils/changes';
+import { changeObservation, fmtChangeList, fmtChangeValue } from '@/utils/changes';
 import { fmtInt } from '@/utils/format';
 import { Button } from '../ui/Button';
 import { Dialog } from '../ui/Dialog';
@@ -37,6 +41,84 @@ const DOT: Record<ChangeAction, string> = {
 };
 
 type Confirm = { kind: 'clear' } | { kind: 'forget' | 'rollback'; ids: string[] };
+
+/** Filtros por coluna (textos sem diferenciar maiúsculas e acentos; horários do datetime-local). */
+interface Filters {
+  table: string;
+  observation: string;
+  attribute: string;
+  oldValue: string;
+  newValue: string;
+  from: string;
+  to: string;
+}
+const NO_FILTERS: Filters = {
+  table: '',
+  observation: '',
+  attribute: '',
+  oldValue: '',
+  newValue: '',
+  from: '',
+  to: '',
+};
+/** Preencher os valores não alterados no XLSX (escolha lembrada) */
+const FILL_KEY = 'geoanalisys-changes-fill';
+/** Ids por requisição de registros (limite do backend) */
+const RECORDS_BATCH = 1000;
+
+const fold = (s: string) =>
+  s
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+
+const fmtTime = (iso: string) =>
+  new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' });
+
+/** A linha passa nos filtros? Com atributo, os valores old/new olham só os atributos que casam. */
+function matches(r: ChangeRow, q: string, f: Filters): boolean {
+  if (q) {
+    const hit = [
+      r.sourceName,
+      r.recordId,
+      changeObservation(r.action, r.observation, r.attributes),
+      ...r.attributes,
+      ...r.oldValues.map(fmtChangeValue),
+      ...r.newValues.map(fmtChangeValue),
+    ].some((s) => fold(s).includes(q));
+    if (!hit) return false;
+  }
+  if (f.table && r.sourceName !== f.table) return false;
+  const obs = fold(f.observation);
+  if (obs && !fold(changeObservation(r.action, r.observation, r.attributes)).includes(obs)) {
+    return false;
+  }
+  const attr = fold(f.attribute);
+  const idx = r.attributes.flatMap((a, i) => (!attr || fold(a).includes(attr) ? [i] : []));
+  if (attr && !idx.length) return false;
+  const oldV = fold(f.oldValue);
+  if (oldV && !idx.some((i) => fold(fmtChangeValue(r.oldValues[i])).includes(oldV))) return false;
+  const newV = fold(f.newValue);
+  if (newV && !idx.some((i) => fold(fmtChangeValue(r.newValues[i])).includes(newV))) return false;
+  const t = new Date(r.updatedAt).getTime();
+  if (f.from && t < new Date(f.from).getTime()) return false;
+  // Sem segundos no campo: "até 10:30" inclui 10:30:59.
+  if (f.to && t >= new Date(f.to).getTime() + (f.to.length <= 16 ? 60_000 : 1000)) return false;
+  return true;
+}
+
+function FilterField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="flex min-w-0 flex-col gap-0.5 text-[11px] font-medium text-slate-500">
+      {label}
+      {children}
+    </label>
+  );
+}
+
+const filterInput =
+  'h-7 w-full min-w-0 rounded-md border border-slate-300 px-2 text-xs text-slate-800 focus:border-accent-500 focus:outline-none';
 
 function SelectBox({
   checked,
@@ -99,6 +181,24 @@ export default function ChangesDialog() {
   const project = useProjectStore((s) => s.project);
   const qc = useQueryClient();
   const [q, setQ] = useState('');
+  const [filters, setFilters] = useState<Filters>(NO_FILTERS);
+  const [onlyMarked, setOnlyMarked] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [fill, setFill] = useState(() => {
+    try {
+      return localStorage.getItem(FILL_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const changeFill = (on: boolean) => {
+    setFill(on);
+    try {
+      localStorage.setItem(FILL_KEY, on ? '1' : '0');
+    } catch {
+      /* só nesta sessão */
+    }
+  };
   const [page, setPage] = useState(0);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -181,19 +281,29 @@ export default function ChangesDialog() {
     },
   });
 
+  const tables = useMemo(
+    () =>
+      [...new Set((changes.data ?? []).map((r) => r.sourceName))].sort((x, y) =>
+        x.localeCompare(y, 'pt-BR'),
+      ),
+    [changes.data],
+  );
+  const filtering = q.trim() !== '' || Object.values(filters).some(Boolean);
   const rows = useMemo(() => {
     const all = changes.data ?? [];
-    const t = q.trim().toLowerCase();
-    if (!t) return all;
-    return all.filter((r) =>
-      [
-        r.sourceName,
-        r.recordId,
-        changeObservation(r.action, r.observation, r.attributes),
-        ...r.attributes,
-      ].some((s) => s.toLowerCase().includes(t)),
+    const t = fold(q);
+    return all.filter(
+      (r) => (!onlyMarked || selected.has(r.id)) && (!filtering || matches(r, t, filters)),
     );
-  }, [changes.data, q]);
+  }, [changes.data, q, filters, filtering, onlyMarked, selected]);
+  const setFilter = (p: Partial<Filters>) => {
+    setFilters((f) => ({ ...f, ...p }));
+    setPage(0);
+  };
+  const timeError =
+    filters.from && filters.to && new Date(filters.from) > new Date(filters.to)
+      ? 'O início é depois do fim.'
+      : null;
   const pages = Math.max(1, Math.ceil(rows.length / PAGE));
   const current = Math.min(page, pages - 1);
   const shown = rows.slice(current * PAGE, current * PAGE + PAGE);
@@ -223,14 +333,63 @@ export default function ChangesDialog() {
       return next;
     });
 
-  const download = async () => {
+  /** `ids` = só essas linhas; ausente = todas */
+  const download = async (ids?: string[]) => {
     setDownloading(true);
     try {
-      await changesService.downloadXlsx();
+      await changesService.downloadXlsx(ids, fill);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
       setDownloading(false);
+    }
+  };
+
+  /**
+   * Seleciona no mapa os pontos das linhas marcadas (removidos não existem mais). Com várias
+   * tabelas, fica a camada ativa ou a com mais pontos marcados.
+   */
+  const showOnMap = async () => {
+    const bySource = new Map<string, string[]>();
+    for (const r of changes.data ?? []) {
+      if (!selected.has(r.id) || r.action === 'DELETE') continue;
+      bySource.set(r.sourceId, [...(bySource.get(r.sourceId) ?? []), r.recordId]);
+    }
+    if (!bySource.size) {
+      toast.error('As linhas marcadas são de pontos removidos: não há o que mostrar no mapa.');
+      return;
+    }
+    const active = useAppStore.getState().sourceId;
+    const [sourceId, ids] =
+      (active && bySource.has(active) ? ([active, bySource.get(active)!] as const) : null) ??
+      [...bySource].sort((x, y) => y[1].length - x[1].length)[0];
+    setLocating(true);
+    try {
+      const points: ToolPoint[] = [];
+      for (let i = 0; i < ids.length; i += RECORDS_BATCH) {
+        const recs = await pointsService.records(sourceId, ids.slice(i, i + RECORDS_BATCH));
+        for (const p of recs) {
+          if (p.x !== null && p.y !== null && p.lat !== null && p.lng !== null) {
+            points.push({ id: p.id, x: p.x, y: p.y, lat: p.lat, lng: p.lng });
+          }
+        }
+      }
+      if (!points.length) {
+        toast.error('Os pontos marcados não foram encontrados ou estão sem coordenadas.');
+        return;
+      }
+      selectPoints(sourceId, points);
+      const others = bySource.size - 1;
+      toast.success(
+        `${fmtInt(points.length)} ponto(s) selecionado(s) no mapa${
+          others ? ` (só de uma tabela; ${fmtInt(others)} outra(s) ficaram de fora)` : ''
+        }.`,
+      );
+      closeDialog('changes');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setLocating(false);
     }
   };
 
@@ -294,13 +453,34 @@ export default function ChangesDialog() {
             <Button icon={<FileUp className="size-4" />} onClick={() => setImporting(true)}>
               Importar
             </Button>
+            <label
+              className="flex items-center gap-1.5 text-xs text-slate-600"
+              title="No XLSX, os atributos das colunas de alteração que o ponto não alterou vêm com o valor atual dele (old = new). Adicionados: só new; removidos: só old. Atributos que nenhum ponto alterou continuam fora."
+            >
+              <input
+                type="checkbox"
+                checked={fill}
+                onChange={(e) => changeFill(e.target.checked)}
+                className="accent-accent-600"
+              />
+              Preencher valores não alterados
+            </label>
             <Button
               icon={<Download className="size-4" />}
               loading={downloading}
-              disabled={!total}
-              onClick={download}
+              disabled={!rows.length}
+              title={
+                filtering || onlyMarked
+                  ? 'Baixa só as linhas que aparecem com os filtros atuais'
+                  : 'Baixa a tabela inteira'
+              }
+              onClick={() =>
+                void download(filtering || onlyMarked ? rows.map((r) => r.id) : undefined)
+              }
             >
-              Baixar XLSX
+              {filtering || onlyMarked
+                ? `Baixar XLSX (${fmtInt(rows.length)} filtradas)`
+                : 'Baixar XLSX'}
             </Button>
             <Button variant="primary" onClick={() => closeDialog('changes')}>
               Fechar
@@ -309,67 +489,193 @@ export default function ChangesDialog() {
         )
       }
     >
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="relative min-w-48 flex-1">
-          <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-slate-400" />
-          <input
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setPage(0);
-            }}
-            placeholder="Filtrar por tabela, ID, observação ou atributo…"
-            className="h-8 w-full rounded-md border border-slate-300 pr-2 pl-7 text-sm focus:border-accent-500 focus:outline-none"
-          />
+      {/* Fixa no topo enquanto a lista rola (compensa o padding do corpo da janela). */}
+      <div className="sticky -top-4 z-10 -mx-5 -mt-4 mb-3 space-y-2 border-b border-slate-200 bg-white px-5 pt-4 pb-2.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative min-w-48 flex-1">
+            <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              value={q}
+              onChange={(e) => {
+                setQ(e.target.value);
+                setPage(0);
+              }}
+              placeholder="Buscar em tudo (tabela, ID, observação, atributos e valores)…"
+              className="h-8 w-full rounded-md border border-slate-300 pr-2 pl-7 text-sm focus:border-accent-500 focus:outline-none"
+            />
+          </div>
+          <span className="text-xs text-slate-500">
+            {fmtInt(rows.length)}
+            {rows.length !== total && ` de ${fmtInt(total)}`} registro(s)
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<RefreshCw className="size-3.5" />}
+            onClick={() => changes.refetch()}
+            loading={changes.isFetching}
+          >
+            Atualizar
+          </Button>
         </div>
-        <span className="text-xs text-slate-500">
-          {fmtInt(rows.length)}
-          {rows.length !== total && ` de ${fmtInt(total)}`} registro(s)
-        </span>
-        <Button
-          size="sm"
-          variant="ghost"
-          icon={<RefreshCw className="size-3.5" />}
-          onClick={() => changes.refetch()}
-          loading={changes.isFetching}
-        >
-          Atualizar
-        </Button>
-      </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+          <FilterField label="Tabela">
+            <select
+              value={filters.table}
+              onChange={(e) => setFilter({ table: e.target.value })}
+              className={filterInput}
+            >
+              <option value="">Todas</option>
+              {tables.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </FilterField>
+          <FilterField label="Observação">
+            <input
+              value={filters.observation}
+              onChange={(e) => setFilter({ observation: e.target.value })}
+              placeholder="contém…"
+              className={filterInput}
+            />
+          </FilterField>
+          <FilterField label="Atributo alterado">
+            <input
+              value={filters.attribute}
+              onChange={(e) => setFilter({ attribute: e.target.value })}
+              placeholder="contém…"
+              className={filterInput}
+            />
+          </FilterField>
+          <FilterField label="Valor old">
+            <input
+              value={filters.oldValue}
+              onChange={(e) => setFilter({ oldValue: e.target.value })}
+              placeholder="contém…"
+              className={filterInput}
+            />
+          </FilterField>
+          <FilterField label="Valor new">
+            <input
+              value={filters.newValue}
+              onChange={(e) => setFilter({ newValue: e.target.value })}
+              placeholder="contém…"
+              className={filterInput}
+            />
+          </FilterField>
+          <FilterField label="De (horário)">
+            <input
+              type="datetime-local"
+              step={1}
+              value={filters.from}
+              onChange={(e) => setFilter({ from: e.target.value })}
+              className={filterInput}
+            />
+          </FilterField>
+          <FilterField label="Até (horário)">
+            <input
+              type="datetime-local"
+              step={1}
+              value={filters.to}
+              onChange={(e) => setFilter({ to: e.target.value })}
+              className={filterInput}
+            />
+          </FilterField>
+        </div>
+        {timeError && <p className="text-xs text-red-600">{timeError}</p>}
+        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+          <Button size="sm" disabled={!rows.length || allInView} onClick={() => toggleAll(true)}>
+            Marcar {filtering ? 'filtradas' : 'todas'} ({fmtInt(rows.length)})
+          </Button>
+          <Button size="sm" disabled={!markedInView} onClick={() => toggleAll(false)}>
+            Desmarcar {filtering ? 'filtradas' : 'todas'}
+          </Button>
+          <label className="ml-1 flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={onlyMarked}
+              onChange={(e) => {
+                setOnlyMarked(e.target.checked);
+                setPage(0);
+              }}
+              className="accent-accent-600"
+            />
+            Mostrar só as marcadas
+          </label>
+          {(filtering || onlyMarked) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto"
+              icon={<FilterX className="size-3.5" />}
+              onClick={() => {
+                setQ('');
+                setFilters(NO_FILTERS);
+                setOnlyMarked(false);
+                setPage(0);
+              }}
+            >
+              Limpar filtros
+            </Button>
+          )}
+        </div>
 
-      {marked.length > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md bg-accent-50 px-2.5 py-1.5 text-xs text-slate-700">
-          <span className="mr-auto font-medium">{fmtInt(marked.length)} marcada(s)</span>
-          <Button
-            size="sm"
-            icon={<Eraser className="size-3.5" />}
-            disabled={busy}
-            onClick={() => setConfirm({ kind: 'forget', ids: marked })}
-          >
-            Limpar
-          </Button>
-          <Button
-            size="sm"
-            icon={<MessageSquareText className="size-3.5" />}
-            disabled={busy}
-            onClick={() => setObserving(marked)}
-          >
-            Observação
-          </Button>
-          <Button
-            size="sm"
-            className="text-red-600"
-            icon={<Undo2 className="size-3.5" />}
-            disabled={busy}
-            onClick={() => setConfirm({ kind: 'rollback', ids: marked })}
-          >
-            Rollback
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
-            Desmarcar
-          </Button>
-        </div>
-      )}
+        {marked.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md bg-accent-50 px-2.5 py-1.5 text-xs text-slate-700">
+            <span className="mr-auto font-medium">{fmtInt(marked.length)} marcada(s)</span>
+            <Button
+              size="sm"
+              icon={<Download className="size-3.5" />}
+              loading={downloading}
+              disabled={busy}
+              onClick={() => void download(marked)}
+              title="Baixa só as linhas marcadas"
+            >
+              Baixar XLSX
+            </Button>
+            <Button
+              size="sm"
+              icon={<MapPin className="size-3.5" />}
+              loading={locating}
+              disabled={busy}
+              onClick={() => void showOnMap()}
+              title="Seleciona no mapa os pontos das linhas marcadas"
+            >
+              Ver no mapa
+            </Button>
+            <Button
+              size="sm"
+              icon={<Eraser className="size-3.5" />}
+              disabled={busy}
+              onClick={() => setConfirm({ kind: 'forget', ids: marked })}
+            >
+              Limpar
+            </Button>
+            <Button
+              size="sm"
+              icon={<MessageSquareText className="size-3.5" />}
+              disabled={busy}
+              onClick={() => setObserving(marked)}
+            >
+              Observação
+            </Button>
+            <Button
+              size="sm"
+              className="text-red-600"
+              icon={<Undo2 className="size-3.5" />}
+              disabled={busy}
+              onClick={() => setConfirm({ kind: 'rollback', ids: marked })}
+            >
+              Rollback
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+              Desmarcar
+            </Button>
+          </div>
+        )}
+      </div>
 
       {changes.isLoading ? (
         <SkeletonList rows={6} />
@@ -377,13 +683,13 @@ export default function ChangesDialog() {
         <ErrorState error={changes.error} onRetry={() => changes.refetch()} />
       ) : !rows.length ? (
         <p className="py-10 text-center text-sm text-slate-500">
-          {total ? 'Nenhuma alteração corresponde ao filtro.' : 'Nenhuma alteração registrada.'}
+          {total ? 'Nenhuma alteração corresponde aos filtros.' : 'Nenhuma alteração registrada.'}
         </p>
       ) : (
         <>
           <div className="scroll-thin overflow-auto rounded-md border border-slate-200">
             <table className="w-full text-left text-xs">
-              <thead className="sticky top-0 bg-slate-50 text-slate-600">
+              <thead className="bg-slate-50 text-slate-600">
                 <tr>
                   <th className="w-8 px-2.5 py-2">
                     <SelectBox
@@ -401,6 +707,7 @@ export default function ChangesDialog() {
                     'Atributos Alterados',
                     'Valores Old',
                     'Valores New',
+                    'Horário',
                   ].map((h) => (
                     <th key={h} className="px-2.5 py-2 font-semibold whitespace-nowrap">
                       {h}
@@ -463,6 +770,9 @@ export default function ChangesDialog() {
                     <td className="px-2.5 py-1.5 font-mono">{fmtChangeList(r.attributes)}</td>
                     <td className="px-2.5 py-1.5 font-mono">{fmtChangeList(r.oldValues)}</td>
                     <td className="px-2.5 py-1.5 font-mono">{fmtChangeList(r.newValues)}</td>
+                    <td className="px-2.5 py-1.5 whitespace-nowrap text-slate-500">
+                      {fmtTime(r.updatedAt)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -506,7 +816,10 @@ export default function ChangesDialog() {
         )}
       {importing &&
         createPortal(
-          <ChangeImportDialog onClose={() => setImporting(false)} onImported={() => refresh(true)} />,
+          <ChangeImportDialog
+            onClose={() => setImporting(false)}
+            onImported={() => refresh(true)}
+          />,
           document.body,
         )}
     </Dialog>

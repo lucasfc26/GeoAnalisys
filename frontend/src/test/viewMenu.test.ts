@@ -1,5 +1,8 @@
 import { initDesktopTools } from '@/lib/desktopTools';
+import { defaultToolbarLayout, layoutButtonState } from '@/lib/toolbarLayout';
 import { useAppStore } from '@/stores/appStore';
+
+const buttons = layoutButtonState(defaultToolbarLayout());
 
 describe('menu Exibir (programa desktop)', () => {
   afterEach(() => {
@@ -10,6 +13,7 @@ describe('menu Exibir (programa desktop)', () => {
     useAppStore.setState({
       viewHidden: { layers: false, maps: false, info: false },
       toolbarSide: 'left',
+      toolbarLayout: defaultToolbarLayout('left'),
     });
     let toggle: (part: string) => void = () => {};
     const state = vi.fn();
@@ -23,6 +27,7 @@ describe('menu Exibir (programa desktop)', () => {
       maps: true,
       info: true,
       toolbar: 'left',
+      buttons,
     });
 
     toggle('info');
@@ -32,6 +37,7 @@ describe('menu Exibir (programa desktop)', () => {
       maps: true,
       info: false,
       toolbar: 'left',
+      buttons,
     });
 
     toggle('layers');
@@ -44,6 +50,7 @@ describe('menu Exibir (programa desktop)', () => {
       maps: false,
       info: true,
       toolbar: 'left',
+      buttons,
     });
 
     // Parte desconhecida é ignorada
@@ -55,6 +62,7 @@ describe('menu Exibir (programa desktop)', () => {
     useAppStore.setState({
       viewHidden: { layers: false, maps: false, info: false },
       toolbarSide: 'left',
+      toolbarLayout: defaultToolbarLayout('left'),
     });
     let toggle: (part: string) => void = () => {};
     const state = vi.fn();
@@ -70,6 +78,7 @@ describe('menu Exibir (programa desktop)', () => {
       maps: true,
       info: true,
       toolbar: 'top',
+      buttons,
     });
 
     toggle('toolbar:right');
@@ -78,5 +87,34 @@ describe('menu Exibir (programa desktop)', () => {
     // Lado desconhecido é ignorado
     toggle('toolbar:diagonal');
     expect(useAppStore.getState().toolbarSide).toBe('right');
+  });
+
+  it('mostra ou esconde um botão da barra pelo menu Exibir › Painel', () => {
+    useAppStore.setState({
+      viewHidden: { layers: false, maps: false, info: false },
+      toolbarSide: 'left',
+      toolbarLayout: defaultToolbarLayout('left'),
+    });
+    let toggle: (part: string) => void = () => {};
+    const state = vi.fn();
+    window.geoanalisys = {
+      view: { onToggle: (fn) => (toggle = fn), state },
+    };
+    initDesktopTools();
+
+    toggle('button:pan');
+    expect(useAppStore.getState().toolbarLayout.hidden).toContain('pan');
+    const hidden = layoutButtonState(useAppStore.getState().toolbarLayout);
+    expect(hidden.find((b) => b.id === 'pan')?.visible).toBe(false);
+    expect(state).toHaveBeenLastCalledWith({
+      layers: true,
+      maps: true,
+      info: true,
+      toolbar: 'left',
+      buttons: hidden,
+    });
+
+    toggle('button:pan');
+    expect(useAppStore.getState().toolbarLayout.hidden).not.toContain('pan');
   });
 });

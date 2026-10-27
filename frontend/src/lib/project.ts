@@ -67,6 +67,8 @@ declare global {
           info: boolean;
           /** Lado da barra de ferramentas */
           toolbar: string;
+          /** Exibir › Painel: cada botão da barra */
+          buttons?: { id: string; label: string; visible: boolean }[];
         }) => void;
       };
       /** Caminho no disco de um arquivo escolhido (null se não houver) */

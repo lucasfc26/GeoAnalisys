@@ -10,6 +10,7 @@ export const KEY_SCORE = '@score';
 export const KEY_WEIGHT = '@weight';
 export const KEY_STATUS = '@status';
 export const AGGREGATES_LABEL = 'agregados';
+export const ADDRESS_LABEL = 'endereço';
 export const critKey = (label: string) => `@crit:${label}`;
 export const attrKey = (side: 'A' | 'B', column: string) => `${side}:${column}`;
 
@@ -74,7 +75,7 @@ export function associationColumns(
     result(KEY_ID_B, `ID ${nameB}`),
     result(KEY_DISTANCE, 'Distância (m)'),
     result(KEY_SCORE, 'Prioridades atendidas'),
-    result(KEY_WEIGHT, 'Pontuação', 'soma dos pesos atendidos'),
+    result(KEY_WEIGHT, 'Penalidade (m)', 'soma das penalidades não atendidas'),
     result(KEY_STATUS, 'Status'),
     ...critLabels.map((l) => result(critKey(l), `Prioridade: ${l}`)),
     ...attrs('A', a),

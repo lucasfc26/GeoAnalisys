@@ -12,10 +12,29 @@ import {
   type TreeRef,
 } from '@/lib/layerTree';
 import type { ToolbarSide } from '@/lib/toolbar';
+import { isToolbarSide } from '@/lib/toolbar';
+import {
+  addToolbarBar,
+  defaultToolbarLayout,
+  groupToolbarItems,
+  moveAllToSide,
+  moveSide,
+  normalizeToolbarLayout,
+  insertDivider,
+  placeToolbarItem,
+  removeDivider,
+  removeToolbarBar,
+  setGroupCurrent,
+  toggleToolbarButton,
+  ungroupToolbarItem,
+  type ToolbarButtonId,
+  type ToolbarLayout,
+} from '@/lib/toolbarLayout';
 import {
   SELECT_TOOLS,
   type Basemap,
   type BoundaryLayer,
+  type BoundarySelection,
   type CustomBasemap,
   type Bounds,
   type FilterDef,
@@ -38,12 +57,26 @@ export interface SearchWindow {
   sourceId: string;
 }
 
+/**
+ * O que o clique num ponto seleciona: só a camada ativa, a camada de cima naquele local (que vira a
+ * ativa) ou os pontos de todas as camadas ali (a de cima vira a ativa; as demais ficam marcadas).
+ */
+export type ClickTarget = 'active' | 'top' | 'all';
+
 /** Modo lista: percorrer os valores um a um ou selecionar todos os pontos da lista de uma vez. */
 export type ListMode = 'walk' | 'all';
+
+export interface ListSeed {
+  /** Coluna dos valores (em geral a de ID) */
+  column: string;
+  values: string[];
+}
 
 export interface ListWindow extends SearchWindow {
   /** Modo inicial da janela */
   mode?: ListMode;
+  /** Lista já preenchida e localizada ao abrir */
+  seed?: ListSeed;
 }
 
 const windowId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -81,6 +114,13 @@ interface AppState {
    * mesmas coordenadas aparecem em cinza no painel. null = todos iguais.
    */
   primaryIds: string[] | null;
+  /**
+   * Pontos de outras camadas selecionados junto (clique em "todas as camadas"): camada -> coordenada
+   * -> registros. Só a camada ativa é editável; estes aparecem marcados no mapa e listados no painel.
+   */
+  otherSelection: Record<string, Record<string, SelectedGroup>>;
+  /** O que o clique num ponto seleciona (preferência da máquina) */
+  clickTarget: ClickTarget;
   /** Coordenada em foco no painel (quando há várias selecionadas) */
   activeKey: string | null;
   /** Registro aberto no painel */
@@ -102,12 +142,20 @@ interface AppState {
   basemapNames: Record<string, string>;
   /** Camadas de limites (só metadados; as geometrias ficam no IndexedDB) */
   boundaries: BoundaryLayer[];
+  /** Limite escolhido no painel: o clique no mapa consulta as feições dele */
+  activeBoundaryId: string | null;
+  /** Feição consultada (índice na coleção do limite) */
+  boundarySelection: BoundarySelection | null;
   focus: MapFocus | null;
   panelOpen: boolean;
   /** Menu Exibir: partes da tela ocultas (preferência da máquina, fora do projeto) */
   viewHidden: ViewHidden;
   /** Lado da barra de ferramentas nas telas grandes (preferência da máquina, fora do projeto) */
   toolbarSide: ToolbarSide;
+  /** Onde cada botão está e quais subdivisões existem (preferência da máquina) */
+  toolbarLayout: ToolbarLayout;
+  /** Arraste de um botão em andamento: os lados vazios viram alvo */
+  toolbarDragging: boolean;
   /** Desktop: painel da direita recolhido (só a faixa para reabrir) */
   panelCollapsed: boolean;
   /** Desktop: largura do painel da direita (px) */
@@ -184,9 +232,13 @@ interface AppState {
   moveBoundary: (id: string, delta: -1 | 1) => void;
   /** Arrastar e soltar um limite antes/depois de outro */
   dropBoundary: (dragId: string, targetId: string, where: 'before' | 'after') => void;
+  /** Ativa um limite para consultar feições no mapa (null encerra a consulta) */
+  setActiveBoundary: (id: string | null) => void;
+  /** Feição do limite ativo sob o clique; null limpa só a feição */
+  setBoundarySelection: (selection: BoundarySelection | null) => void;
   setTool: (tool: Tool) => void;
   setTransform: (mode: TransformMode | null) => void;
-  openListWindow: (sourceId: string, mode?: ListMode) => void;
+  openListWindow: (sourceId: string, mode?: ListMode, seed?: ListSeed) => void;
   closeListWindow: (id: string) => void;
   /** Abre mais uma janela "Selecionar por valor" para a camada */
   openSearchWindow: (sourceId: string) => void;
@@ -206,11 +258,42 @@ interface AppState {
   toggleGroup: (group: SelectedGroup) => void;
   clearSelection: () => void;
   removeIds: (ids: string[]) => void;
+  setClickTarget: (target: ClickTarget) => void;
+  /** Substitui os pontos selecionados das outras camadas */
+  setOtherSelection: (other: Record<string, Record<string, SelectedGroup>>) => void;
+  /** Tira registros de outra camada da seleção */
+  removeOtherIds: (layerId: string, ids: string[]) => void;
+  /**
+   * Torna ativa uma das outras camadas selecionadas, mantendo a seleção de todas (a camada ativa
+   * anterior passa para as "outras"), e abre o registro `id`.
+   */
+  promoteLayer: (layerId: string, key: string | null, id: string | null) => void;
   openRecord: (key: string | null, id: string | null) => void;
   focusMap: (f: Omit<MapFocus, 'nonce'>) => void;
   /** Mostra/oculta uma parte da tela (sem `show`: alterna) */
   setViewHidden: (part: ViewPart, hidden?: boolean) => void;
   setToolbarSide: (side: ToolbarSide) => void;
+  setToolbarDragging: (dragging: boolean) => void;
+  /** Leva os botões de um lado da tela (ou só de uma barra dele) para outro. */
+  moveToolbarSide: (from: ToolbarSide, to: ToolbarSide, bar?: number) => void;
+  /** Solta um botão, grupo ou subdivisão diante de `beforeId` (null = fim da barra). */
+  placeToolbarItem: (
+    id: string,
+    side: ToolbarSide,
+    beforeId: string | null,
+    end?: 'side' | 'list',
+    bar?: number,
+  ) => void;
+  insertToolbarDivider: (side: ToolbarSide, beforeId: string | null, bar?: number) => boolean;
+  removeToolbarDivider: (id: string) => void;
+  /** Botão solto sobre outro: vira grupo (pastinha) ou entra no grupo. */
+  groupToolbarItems: (dragId: string, targetId: string) => void;
+  ungroupToolbarItem: (groupId: string) => void;
+  setToolbarGroupCurrent: (groupId: string, id: ToolbarButtonId) => void;
+  addToolbarBar: (side: ToolbarSide) => void;
+  removeToolbarBar: (side: ToolbarSide, bar: number) => void;
+  /** Exibir › Painel: mostra ou oculta o botão (sem argumento, alterna). */
+  setToolbarButtonShown: (id: string, shown?: boolean) => void;
   setPanelOpen: (open: boolean) => void;
   setPanelCollapsed: (collapsed: boolean) => void;
   setPanelWidth: (width: number) => void;
@@ -250,10 +333,16 @@ const closedDialogs: AppState['dialogs'] = {
 
 const noSelection = {
   selection: {},
+  otherSelection: {},
   activeKey: null,
   activeRecordId: null,
   transform: null,
   primaryIds: null,
+};
+
+const noBoundaryPick = {
+  activeBoundaryId: null,
+  boundarySelection: null,
 };
 
 /** Preferências salvas no navegador. O sistema se chamava "Censo GIS": migra a chave antiga. */
@@ -269,7 +358,7 @@ try {
 
 export const useAppStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       sourceId: null,
       tool: 'select',
       lastSelectTool: 'select',
@@ -278,6 +367,8 @@ export const useAppStore = create<AppState>()(
       layerTree: [],
       layerFilters: {},
       selection: {},
+      otherSelection: {},
+      clickTarget: 'top',
       primaryIds: null,
       activeKey: null,
       activeRecordId: null,
@@ -289,9 +380,13 @@ export const useAppStore = create<AppState>()(
       basemapOrder: [],
       basemapNames: {},
       boundaries: [],
+      activeBoundaryId: null,
+      boundarySelection: null,
       focus: null,
       viewHidden: { layers: false, maps: false, info: false },
       toolbarSide: 'left',
+      toolbarLayout: defaultToolbarLayout(),
+      toolbarDragging: false,
       panelOpen: false,
       panelCollapsed: false,
       panelWidth: 384,
@@ -306,9 +401,11 @@ export const useAppStore = create<AppState>()(
       setSource: (id) =>
         set((s) => {
           if (id === s.sourceId) {
-            return id && !s.layers.some((l) => l.sourceId === id)
-              ? syncTree([newLayer(id, s.layers.length), ...s.layers], s.layerTree)
-              : {};
+            const tree =
+              id && !s.layers.some((l) => l.sourceId === id)
+                ? syncTree([newLayer(id, s.layers.length), ...s.layers], s.layerTree)
+                : {};
+            return { ...tree, ...noBoundaryPick };
           }
           const layerFilters = s.sourceId
             ? { ...s.layerFilters, [s.sourceId]: s.filters }
@@ -325,6 +422,7 @@ export const useAppStore = create<AppState>()(
             layerFilters,
             ...syncTree(layers, s.layerTree),
             ...noSelection,
+            ...noBoundaryPick,
           };
         }),
 
@@ -445,8 +543,10 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           transform: transform && Object.keys(s.selection).length ? transform : null,
         })),
-      openListWindow: (sourceId, mode) =>
-        set((s) => ({ listWindows: [...s.listWindows, { id: windowId(), sourceId, mode }] })),
+      openListWindow: (sourceId, mode, seed) =>
+        set((s) => ({
+          listWindows: [...s.listWindows, { id: windowId(), sourceId, mode, seed }],
+        })),
       closeListWindow: (id) =>
         set((s) => ({ listWindows: s.listWindows.filter((w) => w.id !== id) })),
       openSearchWindow: (sourceId) =>
@@ -480,7 +580,27 @@ export const useAppStore = create<AppState>()(
         set((s) => ({
           boundaries: s.boundaries.map((b) => (b.id === id ? { ...b, ...patch } : b)),
         })),
-      removeBoundary: (id) => set((s) => ({ boundaries: s.boundaries.filter((b) => b.id !== id) })),
+      removeBoundary: (id) =>
+        set((s) => ({
+          boundaries: s.boundaries.filter((b) => b.id !== id),
+          ...(s.activeBoundaryId === id ? noBoundaryPick : {}),
+        })),
+      setActiveBoundary: (id) =>
+        set((s) => ({
+          activeBoundaryId: id,
+          boundarySelection: id && id === s.activeBoundaryId ? s.boundarySelection : null,
+          ...(id ? { panelOpen: true, panelCollapsed: false } : {}),
+          boundaries:
+            id && s.boundaries.some((b) => b.id === id && !b.visible)
+              ? s.boundaries.map((b) => (b.id === id ? { ...b, visible: true } : b))
+              : s.boundaries,
+        })),
+      setBoundarySelection: (boundarySelection) =>
+        set(
+          boundarySelection
+            ? { boundarySelection, panelOpen: true, panelCollapsed: false }
+            : { boundarySelection },
+        ),
       setFilters: (filters) =>
         set((s) => ({
           filters,
@@ -503,6 +623,7 @@ export const useAppStore = create<AppState>()(
                 : null);
           return {
             selection: next,
+            otherSelection: mode === 'add' ? s.otherSelection : {},
             primaryIds: primaryIds?.length ? primaryIds : null,
             activeKey: single ? single.key : null,
             activeRecordId: only ?? null,
@@ -536,23 +657,93 @@ export const useAppStore = create<AppState>()(
             if (left.length) next[k] = { ...g, ids: left };
           }
           const primary = s.primaryIds?.filter((id) => !remove.has(id)) ?? null;
+          const keys = Object.keys(next);
+          // Sobrou um único registro: abre-o (ex.: tirou da seleção os demais da coordenada).
+          const only = keys.length === 1 && next[keys[0]].ids.length === 1 ? next[keys[0]] : null;
           return {
             selection: next,
             primaryIds: primary?.length ? primary : null,
-            activeRecordId:
-              s.activeRecordId && remove.has(s.activeRecordId) ? null : s.activeRecordId,
-            activeKey: s.activeKey && next[s.activeKey] ? s.activeKey : null,
+            activeRecordId: only
+              ? only.ids[0]
+              : s.activeRecordId && remove.has(s.activeRecordId)
+                ? null
+                : s.activeRecordId,
+            activeKey: only ? only.key : s.activeKey && next[s.activeKey] ? s.activeKey : null,
             transform: Object.keys(next).length ? s.transform : null,
           };
         }),
 
+      setClickTarget: (clickTarget) => set({ clickTarget }),
+      setOtherSelection: (otherSelection) => set({ otherSelection }),
+      removeOtherIds: (layerId, ids) =>
+        set((s) => {
+          const remove = new Set(ids);
+          const groups: Record<string, SelectedGroup> = {};
+          for (const [k, g] of Object.entries(s.otherSelection[layerId] ?? {})) {
+            const left = g.ids.filter((id) => !remove.has(id));
+            if (left.length) groups[k] = { ...g, ids: left };
+          }
+          const otherSelection = { ...s.otherSelection, [layerId]: groups };
+          if (!Object.keys(groups).length) delete otherSelection[layerId];
+          return { otherSelection };
+        }),
+      promoteLayer: (layerId, key, id) => {
+        const s = get();
+        const target = s.otherSelection[layerId];
+        if (!target) return;
+        const rest = { ...s.otherSelection };
+        delete rest[layerId];
+        if (s.sourceId && Object.keys(s.selection).length) rest[s.sourceId] = s.selection;
+        s.setSource(layerId);
+        get().setSelection(Object.values(target));
+        set({ otherSelection: rest });
+        if (id) get().openRecord(key, id);
+      },
       openRecord: (key, id) => set({ activeKey: key, activeRecordId: id, panelOpen: true }),
       focusMap: (f) => set({ focus: { ...f, nonce: Date.now() } }),
       setViewHidden: (part, hidden) =>
         set((s) => ({
           viewHidden: { ...s.viewHidden, [part]: hidden ?? !s.viewHidden[part] },
         })),
-      setToolbarSide: (toolbarSide) => set({ toolbarSide }),
+      setToolbarSide: (toolbarSide) =>
+        set((s) => ({
+          toolbarSide,
+          toolbarLayout: moveAllToSide(s.toolbarLayout, toolbarSide),
+        })),
+      setToolbarDragging: (toolbarDragging) => set({ toolbarDragging }),
+      moveToolbarSide: (from, to, bar) =>
+        set((s) => ({ toolbarLayout: moveSide(s.toolbarLayout, from, to, bar) })),
+      placeToolbarItem: (id, side, beforeId, end, bar) =>
+        set((s) => ({
+          toolbarLayout: placeToolbarItem(s.toolbarLayout, id, side, beforeId, end, bar),
+        })),
+      groupToolbarItems: (dragId, targetId) =>
+        set((s) => ({ toolbarLayout: groupToolbarItems(s.toolbarLayout, dragId, targetId) })),
+      ungroupToolbarItem: (groupId) =>
+        set((s) => ({ toolbarLayout: ungroupToolbarItem(s.toolbarLayout, groupId) })),
+      setToolbarGroupCurrent: (groupId, id) =>
+        set((s) => {
+          const next = setGroupCurrent(s.toolbarLayout, groupId, id);
+          return next === s.toolbarLayout ? {} : { toolbarLayout: next };
+        }),
+      addToolbarBar: (side) =>
+        set((s) => ({ toolbarLayout: addToolbarBar(s.toolbarLayout, side) })),
+      removeToolbarBar: (side, bar) =>
+        set((s) => ({ toolbarLayout: removeToolbarBar(s.toolbarLayout, side, bar) })),
+      insertToolbarDivider: (side, beforeId, bar) => {
+        const next = insertDivider(get().toolbarLayout, side, beforeId, bar);
+        if (!next) return false;
+        set({ toolbarLayout: next });
+        return true;
+      },
+      removeToolbarDivider: (id) =>
+        set((s) => ({ toolbarLayout: removeDivider(s.toolbarLayout, id) })),
+      setToolbarButtonShown: (id, shown) =>
+        set((s) => {
+          const isShown = !s.toolbarLayout.hidden.some((x) => x === id);
+          if (shown !== undefined && shown === isShown) return {};
+          return { toolbarLayout: toggleToolbarButton(s.toolbarLayout, id) };
+        }),
       setPanelOpen: (open) => set({ panelOpen: open }),
       setPanelCollapsed: (panelCollapsed) => set({ panelCollapsed }),
       setPanelWidth: (panelWidth) => set({ panelWidth }),
@@ -582,8 +773,19 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: STORAGE_KEY,
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<AppState>;
+        const side = isToolbarSide(p.toolbarSide) ? p.toolbarSide : current.toolbarSide;
+        return {
+          ...current,
+          ...p,
+          toolbarLayout: normalizeToolbarLayout(p.toolbarLayout, side),
+          toolbarDragging: false,
+        };
+      },
       partialize: (s) => ({
         sourceId: s.sourceId,
+        clickTarget: s.clickTarget,
         tool: s.tool,
         lastSelectTool: s.lastSelectTool,
         filters: s.filters,
@@ -597,6 +799,7 @@ export const useAppStore = create<AppState>()(
         boundaries: s.boundaries,
         viewHidden: s.viewHidden,
         toolbarSide: s.toolbarSide,
+        toolbarLayout: s.toolbarLayout,
         panelCollapsed: s.panelCollapsed,
         panelWidth: s.panelWidth,
         panelHeight: s.panelHeight,

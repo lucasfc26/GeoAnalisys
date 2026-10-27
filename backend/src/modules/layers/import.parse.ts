@@ -52,38 +52,98 @@ export function detectDelimiter(text: string): string {
   return best;
 }
 
+/**
+ * Leitor de CSV em partes (arquivos grandes chegam aos pedaços): aspas, quebras de linha e "" dentro
+ * de campos, mesmo quando caem na divisa entre dois pedaços.
+ */
+export class CsvParser {
+  private row: string[] = [];
+  private field = '';
+  private quoted = false;
+  /** Aspas dentro de campo entre aspas no fim do pedaço: decide com o próximo caractere */
+  private quotePending = false;
+  /** \r no fim do pedaço: um \n logo em seguida é a mesma quebra de linha */
+  private skipLf = false;
+
+  constructor(private readonly delimiter: string) {}
+
+  /** Lê mais um pedaço de texto; as linhas completas vão para `out`. */
+  push(text: string, out: string[][]) {
+    const d = this.delimiter;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (this.skipLf) {
+        this.skipLf = false;
+        if (ch === '\n') continue;
+      }
+      if (this.quotePending) {
+        this.quotePending = false;
+        if (ch === '"') {
+          this.field += '"';
+          continue;
+        }
+        this.quoted = false;
+      }
+      if (this.quoted) {
+        if (ch === '"') {
+          if (i + 1 < text.length) {
+            if (text[i + 1] === '"') {
+              this.field += '"';
+              i++;
+            } else this.quoted = false;
+          } else this.quotePending = true;
+        } else this.field += ch;
+      } else if (ch === '"' && this.field === '') this.quoted = true;
+      else if (ch === d) {
+        this.row.push(this.field);
+        this.field = '';
+      } else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r') {
+          if (i + 1 < text.length) {
+            if (text[i + 1] === '\n') i++;
+          } else this.skipLf = true;
+        }
+        this.row.push(this.field);
+        out.push(this.row);
+        this.row = [];
+        this.field = '';
+      } else this.field += ch;
+    }
+  }
+
+  /** Fim do arquivo: a última linha (sem quebra no fim). */
+  end(out: string[][]) {
+    if (this.quotePending) this.quoted = false;
+    if (this.field !== '' || this.row.length) {
+      this.row.push(this.field);
+      out.push(this.row);
+    }
+    this.row = [];
+    this.field = '';
+  }
+}
+
+/** Linha com algum valor (linhas em branco são ignoradas). */
+export const hasValue = (r: Cell[]) => r.some((v) => v !== null && String(v).trim() !== '');
+
 /** CSV com aspas (incluindo quebras de linha e "" dentro de campos). */
 export function parseCsv(text: string, delimiter = detectDelimiter(text)): string[][] {
   const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else quoted = false;
-      } else field += ch;
-    } else if (ch === '"' && field === '') quoted = true;
-    else if (ch === delimiter) {
-      row.push(field);
-      field = '';
-    } else if (ch === '\n' || ch === '\r') {
-      if (ch === '\r' && text[i + 1] === '\n') i++;
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = '';
-    } else field += ch;
+  const parser = new CsvParser(delimiter);
+  parser.push(text, rows);
+  parser.end(rows);
+  return rows.filter(hasValue);
+}
+
+/** Codificação de um CSV pelo começo do arquivo: UTF-8 ou, se inválido, Windows-1252 ("ANSI"). */
+export function sniffEncoding(head: Uint8Array): 'utf-8' | 'windows-1252' {
+  try {
+    // stream: um caractere cortado no fim do pedaço não conta como inválido.
+    new TextDecoder('utf-8', { fatal: true }).decode(head, { stream: true });
+    return 'utf-8';
+  } catch {
+    return 'windows-1252';
   }
-  if (field !== '' || row.length) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows.filter((r) => r.some((v) => v.trim() !== ''));
 }
 
 // ------------------------------------------------------------------ XLSX
@@ -123,10 +183,18 @@ export async function readWorkbook(buf: Buffer) {
 export function sheetRows(ws: ExcelJS.Worksheet): Cell[][] {
   const rows: Cell[][] = [];
   ws.eachRow({ includeEmpty: false }, (row) => {
-    const values = (row.values as unknown[]).slice(1).map(cellValue);
-    if (values.some((v) => v !== null && String(v).trim() !== '')) rows.push(values);
+    const values = rowValues(row.values);
+    if (hasValue(values)) rows.push(values);
   });
   return rows;
+}
+
+/** Valores de uma linha do ExcelJS (o array começa no índice 1 e pode ter buracos). */
+export function rowValues(values: unknown): Cell[] {
+  if (!Array.isArray(values)) return [];
+  const out: Cell[] = [];
+  for (let i = 1; i < values.length; i++) out.push(cellValue(values[i]));
+  return out;
 }
 
 // ------------------------------------------------------------------ GeoJSON
@@ -396,6 +464,34 @@ export function inferTypes(sheet: Sheet): ImportType[] {
   });
 }
 
+/** Linha do arquivo com a largura do cabeçalho (texto em branco = vazio). */
+export function fitRow(r: Cell[], width: number): Cell[] {
+  const out = new Array<Cell>(width);
+  for (let i = 0; i < width; i++) {
+    const v = r[i] ?? null;
+    out[i] = typeof v === 'string' && v.trim() === '' ? null : v;
+  }
+  return out;
+}
+
+const TYPE_RANK: Record<ImportType, number> = { integer: 0, number: 1, text: 2 };
+
+/**
+ * Tipo mais largo entre o atual e o que o valor precisa (inteiro → decimal → texto). Usado na
+ * importação em partes: o tipo vem de uma amostra e alarga se aparecer um valor que não cabe.
+ */
+export function widenType(current: ImportType, v: Cell): ImportType {
+  if (v === null || current === 'text') return current;
+  const n = toNumber(typeof v === 'boolean' ? null : v);
+  const needed: ImportType =
+    n === null
+      ? 'text'
+      : Number.isInteger(n) && Math.abs(n) <= Number.MAX_SAFE_INTEGER
+        ? 'integer'
+        : 'number';
+  return TYPE_RANK[needed] > TYPE_RANK[current] ? needed : current;
+}
+
 /** Valor convertido para o tipo da coluna (`invalid` quando havia valor mas não converteu). */
 export function convert(
   v: Cell,
@@ -557,28 +653,43 @@ export function suggestColumns(sheet: Sheet, types: ImportType[]) {
 }
 
 /**
- * Coordenadas de cada linha no sistema da camada (X = leste/longitude, Y = norte/latitude), lidas de
- * duas colunas ou de uma coluna com o par. Aceita vírgula/ponto decimal e graus/minutos/segundos.
+ * Coordenadas de uma linha no sistema da camada (X = leste/longitude, Y = norte/latitude), lidas de
+ * duas colunas (`xi`, `yi`) ou de uma coluna com o par (`pair`). Aceita vírgula/ponto decimal e
+ * graus/minutos/segundos.
  */
+export function coordOf(
+  r: Cell[],
+  at: { pair: number; xi: number; yi: number },
+  geographic: boolean,
+): { x: number; y: number } | null {
+  if (at.pair >= 0) {
+    const v = r[at.pair];
+    const p = splitCoordPair(typeof v === 'string' ? v : null);
+    return p ? pairToXY(p, geographic) : null;
+  }
+  const x = parseCoordValue(r[at.xi]);
+  const y = parseCoordValue(r[at.yi]);
+  return x === null || y === null ? null : { x, y };
+}
+
+/** Posição das colunas de coordenada no cabeçalho (-1 = não usada). */
+export function coordColumns(
+  headers: string[],
+  cfg: { xColumn?: string | null; yColumn?: string | null; coordColumn?: string | null },
+) {
+  return cfg.coordColumn
+    ? { pair: headers.indexOf(cfg.coordColumn), xi: -1, yi: -1 }
+    : { pair: -1, xi: headers.indexOf(cfg.xColumn ?? ''), yi: headers.indexOf(cfg.yColumn ?? '') };
+}
+
+/** Coordenadas de cada linha (ver `coordOf`). */
 export function readCoordinates(
   sheet: Sheet,
   cfg: { xColumn?: string | null; yColumn?: string | null; coordColumn?: string | null },
   geographic: boolean,
 ): ({ x: number; y: number } | null)[] {
-  if (cfg.coordColumn) {
-    const c = sheet.headers.indexOf(cfg.coordColumn);
-    return sheet.rows.map((r) => {
-      const p = splitCoordPair(typeof r[c] === 'string' ? r[c] : null);
-      return p ? pairToXY(p, geographic) : null;
-    });
-  }
-  const xi = sheet.headers.indexOf(cfg.xColumn ?? '');
-  const yi = sheet.headers.indexOf(cfg.yColumn ?? '');
-  return sheet.rows.map((r) => {
-    const x = parseCoordValue(r[xi]);
-    const y = parseCoordValue(r[yi]);
-    return x === null || y === null ? null : { x, y };
-  });
+  const at = coordColumns(sheet.headers, cfg);
+  return sheet.rows.map((r) => coordOf(r, at, geographic));
 }
 
 /** Nome de tabela seguro a partir do nome da camada (minúsculas, sem acentos, até 50 caracteres). */

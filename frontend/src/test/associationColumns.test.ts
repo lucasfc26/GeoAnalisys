@@ -26,7 +26,7 @@ describe('colunas da associação', () => {
       'ID Censo Anterior',
       'Distância (m)',
       'Prioridades atendidas',
-      'Pontuação',
+      'Penalidade (m)',
       'Status',
       'Prioridade: medicao',
       'Latitude Censo Atual',

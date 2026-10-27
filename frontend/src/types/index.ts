@@ -142,6 +142,13 @@ export interface CustomBasemap {
   maxZoom: number;
 }
 
+/** Feição de um limite consultada no mapa. */
+export interface BoundarySelection {
+  layerId: string;
+  /** Índice da feição na coleção importada */
+  index: number;
+}
+
 /** Camada de limites (polígonos importados de shapefile/GeoJSON), desenhada só com as bordas. */
 export interface BoundaryLayer {
   id: string;

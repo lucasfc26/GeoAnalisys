@@ -149,6 +149,15 @@ export class ComparisonController {
     return this.comparison.run(toRequest(dto));
   }
 
+  @Post('unmatched')
+  @ApiOperation({
+    summary:
+      'IDs dos pontos de cada camada que estão num grupo sem correspondência na tabela de apoio',
+  })
+  unmatched(@Body() dto: ComparisonDto) {
+    return this.comparison.unmatchedPoints(toRequest(dto));
+  }
+
   @Post(':format')
   @ApiOperation({ summary: 'Quadro Comparativo em XLSX ou CSV' })
   async download(

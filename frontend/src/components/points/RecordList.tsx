@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, X } from 'lucide-react';
 import { useMemo, useRef } from 'react';
 import { pointsService } from '@/services/points';
 import { categoryColor } from '@/utils/format';
@@ -41,6 +41,7 @@ function Row({
   idLabel,
   active,
   onOpen,
+  onRemove,
 }: {
   sourceId: string;
   ids: string[];
@@ -49,6 +50,7 @@ function Row({
   idLabel: string;
   active: boolean;
   onOpen: (id: string, x: number | null, y: number | null) => void;
+  onRemove?: (id: string) => void;
 }) {
   const id = item.id;
   const page = usePage(sourceId, ids, Math.floor(index / PAGE));
@@ -56,49 +58,68 @@ function Row({
   const label = rec?.data.label as string | undefined;
   const category = rec?.data.category as string | undefined;
   return (
-    <button
-      type="button"
-      onClick={() => onOpen(id, rec?.x ?? null, rec?.y ?? null)}
+    <div
       className={clsx(
-        'flex w-full items-center gap-2 border-b border-slate-100 px-3 text-left text-xs',
+        'flex w-full items-center border-b border-slate-100 text-xs',
         item.gap ? 'border-t' : '',
         item.muted ? 'bg-slate-50/70 hover:bg-slate-100' : 'hover:bg-slate-50',
-        item.primary && 'border-l-[3px] border-l-accent-600 pl-[9px]',
+        item.primary && 'border-l-[3px] border-l-accent-600',
         active && 'bg-accent-50',
       )}
       style={{ height: ROW }}
     >
-      <span
-        className={clsx('size-2 shrink-0 rounded-full', item.muted && 'opacity-40')}
-        style={{ background: categoryColor(category) }}
-      />
-      <span className="min-w-0 flex-1">
-        <span
-          className={clsx(
-            'block truncate',
-            item.muted
-              ? 'text-slate-400'
-              : item.primary
-                ? 'font-semibold text-slate-900'
-                : 'font-medium text-slate-800',
-          )}
-        >
-          {idLabel} {id}
-        </span>
-        {page.isLoading ? (
-          <Skeleton className="mt-0.5 h-3 w-24" />
-        ) : (
-          <span
-            className={clsx('block truncate', item.muted ? 'text-slate-400' : 'text-slate-500')}
-          >
-            {[label, category].filter(Boolean).join(' · ') || '—'}
-          </span>
+      <button
+        type="button"
+        onClick={() => onOpen(id, rec?.x ?? null, rec?.y ?? null)}
+        className={clsx(
+          'flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left',
+          item.primary && 'pl-[9px]',
+          onRemove && 'pr-1',
         )}
-      </span>
-      <ChevronRight
-        className={clsx('size-4 shrink-0', item.muted ? 'text-slate-300' : 'text-slate-400')}
-      />
-    </button>
+      >
+        <span
+          className={clsx('size-2 shrink-0 rounded-full', item.muted && 'opacity-40')}
+          style={{ background: categoryColor(category) }}
+        />
+        <span className="min-w-0 flex-1">
+          <span
+            className={clsx(
+              'block truncate',
+              item.muted
+                ? 'text-slate-400'
+                : item.primary
+                  ? 'font-semibold text-slate-900'
+                  : 'font-medium text-slate-800',
+            )}
+          >
+            {idLabel} {id}
+          </span>
+          {page.isLoading ? (
+            <Skeleton className="mt-0.5 h-3 w-24" />
+          ) : (
+            <span
+              className={clsx('block truncate', item.muted ? 'text-slate-400' : 'text-slate-500')}
+            >
+              {[label, category].filter(Boolean).join(' · ') || '—'}
+            </span>
+          )}
+        </span>
+        <ChevronRight
+          className={clsx('size-4 shrink-0', item.muted ? 'text-slate-300' : 'text-slate-400')}
+        />
+      </button>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={() => onRemove(id)}
+          className="mr-1.5 shrink-0 rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+          title="Tirar da seleção"
+          aria-label={`Tirar ${idLabel} ${id} da seleção`}
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -110,6 +131,7 @@ export function RecordList({
   idLabel = 'ID',
   activeId,
   onOpen,
+  onRemove,
   maxHeight = 360,
 }: {
   sourceId: string;
@@ -120,6 +142,8 @@ export function RecordList({
   idLabel?: string;
   activeId: string | null;
   onOpen: (id: string, x: number | null, y: number | null) => void;
+  /** Mostra um X em cada linha para tirar o registro da seleção */
+  onRemove?: (id: string) => void;
   maxHeight?: number;
 }) {
   const rows = useMemo<RecordItem[]>(() => items ?? ids.map((id) => ({ id })), [items, ids]);
@@ -165,6 +189,7 @@ export function RecordList({
                   idLabel={idLabel}
                   active={row.id === activeId}
                   onOpen={onOpen}
+                  onRemove={onRemove}
                 />
               </div>
             </div>

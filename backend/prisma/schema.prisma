@@ -65,9 +65,13 @@ model AuditLog {
   oldValue  Json?
   newValue  Json?
   createdAt DateTime    @default(now())
+  /// Transação do PostgreSQL que gravou a linha: agrupa uma operação (ex.: edição em massa) para
+  /// desfazer (Ctrl+Z). Linhas anteriores a esta coluna ficam vazias.
+  txId      BigInt?     @default(dbgenerated("txid_current()"))
 
   @@index([sourceId, entityId])
   @@index([createdAt])
+  @@index([userId, txId])
   @@map("audit_log")
 }
 
@@ -108,4 +112,19 @@ model Project {
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
   @@map("projetos")
+}
+
+/// Template das configurações de uma ferramenta (Associar Camadas, Duplicidade, Distância por
+/// atributo, Quadro Comparativo): as escolhas da janela, como ela as guarda, com um nome.
+model ToolTemplate {
+  id        String   @id @default(uuid())
+  /// association | duplicates | attribute-distance | comparison
+  tool      String
+  name      String
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tool, name])
+  @@map("tool_template")
 }

@@ -4,7 +4,7 @@ import { Download, Filter, PanelRight, RefreshCw, Settings2 } from 'lucide-react
 import { useActiveSource, useInvalidatePoints } from '@/hooks/useSourceData';
 import { layerName } from '@/lib/layers';
 import { healthService } from '@/services/sources';
-import { useAppStore } from '@/stores/appStore';
+import { useAppStore, type ClickTarget } from '@/stores/appStore';
 import { SearchBox } from './SearchBox';
 
 function DbStatus() {
@@ -41,6 +41,8 @@ export function TopBar() {
   const panelOpen = useAppStore((s) => s.panelOpen);
   const filters = useAppStore((s) => s.filters);
   const layers = useAppStore((s) => s.layers);
+  const clickTarget = useAppStore((s) => s.clickTarget);
+  const setClickTarget = useAppStore((s) => s.setClickTarget);
   const invalidate = useInvalidatePoints();
 
   return (
@@ -71,6 +73,18 @@ export function TopBar() {
           </option>
         ))}
         <option value="__new">+ Configurar fontes…</option>
+      </select>
+
+      <select
+        value={clickTarget}
+        onChange={(e) => setClickTarget(e.target.value as ClickTarget)}
+        className="h-9 min-w-0 rounded-md border border-white/10 bg-white/10 px-2 text-sm text-white focus:outline-none sm:max-w-44 [&>option]:text-slate-900"
+        aria-label="O clique num ponto seleciona"
+        title="O clique num ponto seleciona: só a camada ativa, a camada de cima naquele local ou os pontos de todas as camadas ali"
+      >
+        <option value="active">Clique: camada ativa</option>
+        <option value="top">Clique: camada de cima</option>
+        <option value="all">Clique: todas as camadas</option>
       </select>
 
       <div className="order-last flex w-full min-w-0 justify-center sm:order-none sm:w-auto sm:flex-1">

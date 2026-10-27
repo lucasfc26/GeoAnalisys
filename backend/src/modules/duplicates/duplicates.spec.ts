@@ -1,4 +1,4 @@
-import { DupOptions, DupPoint, findDuplicates } from './duplicates.logic';
+import { DupOptions, DupPoint, findDuplicates, idRelation } from './duplicates.logic';
 import { describeParts } from './duplicates.service';
 
 const LAT = -3.73;
@@ -19,6 +19,7 @@ const base: DupOptions = {
   rules: [],
   reference: null,
   density: null,
+  ids: null,
   minScore: 0,
 };
 
@@ -36,7 +37,11 @@ describe('duplicidades', () => {
   });
 
   it('regras de atributo: igual, diferente e só na mesma coordenada', () => {
-    const pts = [at(0, ['led', 'p1'], null, 'k'), at(0, ['led', 'p2'], null, 'k'), at(3, ['led', 'p3'])];
+    const pts = [
+      at(0, ['led', 'p1'], null, 'k'),
+      at(0, ['led', 'p2'], null, 'k'),
+      at(3, ['led', 'p3']),
+    ];
     const r = findDuplicates(pts, {
       ...base,
       rules: [
@@ -52,13 +57,28 @@ describe('duplicidades', () => {
 
   it('valores vazios não atendem regras', () => {
     const pts = [at(0, [null]), at(1, [null])];
-    const r = findDuplicates(pts, { ...base, rules: [{ mode: 'different', scope: 'radius', weight: 5 }] });
+    const r = findDuplicates(pts, {
+      ...base,
+      rules: [{ mode: 'different', scope: 'radius', weight: 5 }],
+    });
     expect(r[0].score).toBe(0);
   });
 
   it('associação à referência e pontos sem associação por perto', () => {
-    const reference = { bothMatched: -3, oneMatched: 2, noneMatched: 1 };
-    const pts = [at(0, [], true), at(2, [], false), at(4, [], false), at(6, [], false), at(100, [], true)];
+    const reference = {
+      maxDistance: 25,
+      shared: 0,
+      bothMatched: -3,
+      oneMatched: 2,
+      noneMatched: 1,
+    };
+    const pts = [
+      at(0, [], true),
+      at(2, [], false),
+      at(4, [], false),
+      at(6, [], false),
+      at(100, [], true),
+    ];
     const r = findDuplicates(pts, {
       ...base,
       radius: 3,
@@ -71,6 +91,74 @@ describe('duplicidades', () => {
     expect(pair(0, 1)).toMatchObject({ score: -2, nearbyUnmatched: 2 });
     // 2-3: nenhum associado (+1); só o 1 por perto
     expect(pair(2, 3)).toMatchObject({ score: 1, nearbyUnmatched: 1 });
+  });
+
+  it('disputam o mesmo ponto da referência: um ficou com ele e o outro, sem par, o alcança', () => {
+    const reference = {
+      maxDistance: 10,
+      shared: 3,
+      bothMatched: -3,
+      oneMatched: 1,
+      noneMatched: 1,
+    };
+    const refPos = { lat: LAT + 2 / 111_195, lng: LNG };
+    // 0 associado ao ponto da referência a 2 m; 1 (sem par) a 4 m dele; 2 (sem par) a 18 m dele.
+    const pts = [
+      { ...at(0, [], true), refPos },
+      at(6, [], false),
+      at(-16, [], false),
+      { ...at(40, [], true), refPos: { lat: LAT + 41 / 111_195, lng: LNG } },
+      { ...at(43, [], true), refPos: { lat: LAT + 44 / 111_195, lng: LNG } },
+    ];
+    const r = findDuplicates(pts, { ...base, radius: 20, reference, minScore: -100 });
+    const pair = (i: number, j: number) => r.find((p) => p.i === i && p.j === j)!;
+    expect(pair(0, 1).parts.map((p) => p.key)).toEqual(['ref:shared']);
+    expect(pair(0, 2).parts.map((p) => p.key)).toEqual(['ref:one']);
+    // Cada um com o seu ponto (ex.: dois postes que já existiam): diminui a chance.
+    expect(pair(3, 4)).toMatchObject({ score: -3 });
+  });
+
+  it('IDs: em sequência (intencional) ou sem relação (cadastro repetido por engano)', () => {
+    expect(idRelation('123456', '123457', 10)).toBe('sequential');
+    expect(idRelation('123456', '1234562', 10)).toBe('sequential');
+    expect(idRelation('123456', '123470', 10)).toBeNull();
+    expect(idRelation('123456', '234123', 10)).toBe('unrelated');
+    expect(idRelation('PT-0012', 'PT-0013', 10)).toBeNull();
+    expect(idRelation('PT-0012', 'XY-9', 10)).toBe('unrelated');
+    expect(idRelation('123456', '123456', 10)).toBeNull();
+    expect(idRelation(null, '1', 10)).toBeNull();
+  });
+
+  it('cenários: disputa + IDs sem relação + lâmpada igual e cadastrador diferente', () => {
+    const reference = {
+      maxDistance: 10,
+      shared: 3,
+      bothMatched: -3,
+      oneMatched: 1,
+      noneMatched: 1,
+    };
+    const ids = { maxGap: 10, sequential: -2, unrelated: 2 };
+    // Regras: tipo de lâmpada igual (+1), cadastrador diferente (+1).
+    const rules: DupOptions['rules'] = [
+      { mode: 'equal', scope: 'radius', weight: 1 },
+      { mode: 'different', scope: 'radius', weight: 1 },
+    ];
+    const refPos = { lat: LAT, lng: LNG };
+    const pt = (north: number, id: string, cad: string, matched: boolean) => ({
+      ...at(north, ['led', cad], matched),
+      refPos: matched ? refPos : null,
+      idKey: id,
+    });
+    const opts = { ...base, radius: 10, reference, ids, rules, minScore: 3 };
+    // Engano: 123456 e 234123 disputam o mesmo ponto, mesma lâmpada, cadastradores diferentes.
+    const engano = findDuplicates(
+      [pt(0, '123456', 'ana', true), pt(4, '234123', 'bia', false)],
+      opts,
+    );
+    expect(engano[0]).toMatchObject({ score: 3 + 2 + 1 + 1 });
+    // Sequência: 123456 e 123457 — cadastrados de propósito; mesma pessoa.
+    const seq = findDuplicates([pt(0, '123456', 'ana', true), pt(4, '123457', 'ana', false)], opts);
+    expect(seq).toHaveLength(0);
   });
 
   it('agrupa pares ligados por pontos em comum', () => {
@@ -105,7 +193,8 @@ describe('duplicidades', () => {
       [
         { key: 'same', weight: 2 },
         { key: 'rule:0', weight: 1 },
-        { key: 'ref:one', weight: 2 },
+        { key: 'ref:shared', weight: 3 },
+        { key: 'id:unrelated', weight: 2 },
         { key: 'density', weight: -1.5 },
       ],
       {
@@ -116,7 +205,7 @@ describe('duplicidades', () => {
       4,
     );
     expect(text).toBe(
-      'mesma coordenada (+2); potencia igual (+1); só um associado a Censo Anterior (+2); 4 sem associação a até 30 m (−1,5)',
+      'mesma coordenada (+2); potencia igual (+1); disputam o mesmo ponto de Censo Anterior (+3); IDs sem relação (+2); 4 sem associação a até 30 m (−1,5)',
     );
   });
 });
