@@ -10,6 +10,7 @@ import { useAppStore } from '@/stores/appStore';
 import { useSelectionPreviewStore } from '@/stores/selectionPreviewStore';
 import { FloatingPanel } from '../ui/FloatingPanel';
 import { PreviewSettings } from './PreviewSettings';
+import { openOutside, PreviewSurface } from './PreviewFrame';
 
 interface Target {
   sourceId: string;
@@ -110,7 +111,7 @@ function Preview({ target }: { target: Target | null }) {
           </button>
           {external && (
             <a
-              href={external}
+              {...(url ? openOutside(url, external) : { href: external })}
               target="_blank"
               rel="noreferrer"
               className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
@@ -138,14 +139,9 @@ function Preview({ target }: { target: Target | null }) {
           </div>
         )}
         {url ? (
-          <iframe
-            title="Preview"
-            src={url}
-            // Sem acesso ao sistema: não navega a janela principal nem lê o conteúdo dela.
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
-            referrerPolicy="no-referrer"
-            className="block min-h-0 w-full flex-1 border-0 bg-white"
-          />
+          <div className="min-h-0 flex-1">
+            <PreviewSurface title="Preview" url={url} />
+          </div>
         ) : (
           <p className="p-4 text-sm text-slate-500">{message}</p>
         )}

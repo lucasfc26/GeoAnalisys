@@ -1,4 +1,11 @@
-import { previewUrl, templateColumns } from '@/lib/listPreview';
+import {
+  fileUrlOf,
+  isImageFile,
+  localFileEmbedUrl,
+  localFilePath,
+  previewUrl,
+  templateColumns,
+} from '@/lib/listPreview';
 
 const data = {
   ID: 782777,
@@ -52,6 +59,30 @@ describe('preview do modo lista', () => {
     });
     expect(previewUrl(cfg, data, { lat: null, lng: null })).toEqual({
       error: 'O ponto não tem coordenadas.',
+    });
+  });
+
+  it('reconhece arquivo local (file:/// e caminho do Windows) para o preview', () => {
+    const link =
+      'file:///C:/Users/lfrotacu/OneDrive%20-%20NTT%20DATA%20EMEAL/Im%C3%A1genes/Capturas%20de%20pantalla/Captura%20de%20tela%202026-10-05%20103843.png';
+    const path = localFilePath(link);
+    expect(path).toBe(
+      'C:/Users/lfrotacu/OneDrive - NTT DATA EMEAL/Imágenes/Capturas de pantalla/Captura de tela 2026-10-05 103843.png',
+    );
+    expect(isImageFile(path!)).toBe(true);
+    expect(localFileEmbedUrl(path!)).toBe(
+      'local-file://local/C%3A/Users/lfrotacu/OneDrive%20-%20NTT%20DATA%20EMEAL/Im%C3%A1genes/Capturas%20de%20pantalla/Captura%20de%20tela%202026-10-05%20103843.png',
+    );
+    expect(fileUrlOf(path!)).toBe(
+      'file:///C%3A/Users/lfrotacu/OneDrive%20-%20NTT%20DATA%20EMEAL/Im%C3%A1genes/Capturas%20de%20pantalla/Captura%20de%20tela%202026-10-05%20103843.png',
+    );
+    expect(previewUrl({ mode: 'column', column: 'foto', template: '' }, { foto: link })).toEqual({
+      url: link,
+    });
+    const win = String.raw`C:\Fotos\lampada.png`;
+    expect(localFilePath(win)).toBe(win);
+    expect(previewUrl({ mode: 'column', column: 'foto', template: '' }, { foto: win })).toEqual({
+      url: win,
     });
   });
 

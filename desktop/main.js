@@ -9,10 +9,28 @@
  * configurações. O sistema (janela principal) monta e aplica o conteúdo; aqui ficam os diálogos de
  * arquivo, a leitura/gravação no disco e a lista de recentes.
  */
-const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, safeStorage, screen, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, protocol, safeStorage, screen, session, shell } = require('electron');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { fileURLToPath } = require('url');
+const { Readable } = require('stream');
+
+// Preview de arquivos do computador (file:///C:/...). O frame da página não pode abrir file:///;
+// este endereço interno lê o arquivo e o entrega ao preview. Precisa ser registrado antes do app.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'local-file',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+      bypassCSP: true,
+    },
+  },
+]);
 const { friendlyError, listDatabases, startSystem } = require('./server');
 const updater = require('./updater');
 
@@ -341,13 +359,13 @@ function openMainWindow(origin, c) {
         },
       };
     }
-    if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) shell.openExternal(url);
+    openOutside(url, origin);
     return { action: 'deny' };
   });
   // Links clicados dentro de um painel destacado abrem no navegador, como na janela principal.
   mainWin.webContents.on('did-create-window', (child) => {
     child.webContents.setWindowOpenHandler(({ url }) => {
-      if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) shell.openExternal(url);
+      openOutside(url, origin);
       return { action: 'deny' };
     });
     child.webContents.on('will-navigate', (e) => e.preventDefault());
@@ -355,7 +373,7 @@ function openMainWindow(origin, c) {
   mainWin.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith(origin)) {
       e.preventDefault();
-      shell.openExternal(url);
+      openOutside(url, origin);
     }
   });
   mainWin.loadURL(origin);
@@ -628,6 +646,85 @@ ipcMain.on('project:activated', (_e, file) => {
   }
 });
 
+/** Caminho de um file:/// ou do endereço interno do preview. null se não for arquivo local. */
+function localPathFromUrl(url) {
+  try {
+    if (url.startsWith('local-file://local/')) {
+      const unc = url.startsWith('local-file://local/unc/');
+      const rest = url
+        .slice(unc ? 'local-file://local/unc/'.length : 'local-file://local/'.length)
+        .split(/[?#]/)[0];
+      let decoded = decodeURIComponent(rest);
+      if (unc) decoded = `//${decoded}`;
+      if (process.platform === 'win32') decoded = decoded.replace(/\//g, '\\');
+      return path.isAbsolute(decoded) ? decoded : null;
+    }
+    if (url.startsWith('file:')) {
+      const p = fileURLToPath(url);
+      return path.isAbsolute(p) ? p : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Link de fora do sistema: arquivo local abre no programa padrão; o restante, no navegador. */
+function openOutside(url, origin) {
+  const local = localPathFromUrl(url);
+  if (local) {
+    void shell.openPath(local);
+    return;
+  }
+  if (/^https?:\/\//i.test(url) && url.startsWith(origin)) return;
+  shell.openExternal(url);
+}
+
+const LOCAL_MIME = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml',
+  avif: 'image/avif',
+  tif: 'image/tiff',
+  tiff: 'image/tiff',
+  pdf: 'application/pdf',
+  html: 'text/html; charset=utf-8',
+  htm: 'text/html; charset=utf-8',
+  txt: 'text/plain; charset=utf-8',
+};
+
+function registerLocalFiles() {
+  protocol.handle('local-file', async (request) => {
+    const filePath = localPathFromUrl(request.url);
+    const plain = { 'content-type': 'text/plain; charset=utf-8' };
+    if (!filePath) return new Response('Caminho inválido.', { status: 400, headers: plain });
+    let stat;
+    try {
+      stat = await fs.promises.stat(filePath);
+    } catch {
+      return new Response('Arquivo não encontrado.', { status: 404, headers: plain });
+    }
+    if (!stat.isFile()) return new Response('Não é um arquivo.', { status: 404, headers: plain });
+    const ext = path.extname(filePath).slice(1).toLowerCase();
+    const stream = fs.createReadStream(filePath);
+    return new Response(Readable.toWeb(stream), {
+      headers: {
+        'content-type': LOCAL_MIME[ext] || 'application/octet-stream',
+        'content-length': String(stat.size),
+        'content-disposition': 'inline',
+      },
+    });
+  });
+  ipcMain.handle('files:open', (_e, url) => {
+    const local = localPathFromUrl(String(url ?? ''));
+    return local ? shell.openPath(local) : '';
+  });
+}
+
 /**
  * Preview do modo lista: muitos sites proíbem ser exibidos dentro de outra página (X-Frame-Options,
  * CSP frame-ancestors). Só para páginas carregadas em frames, esses bloqueios são removidos; o frame
@@ -677,6 +774,7 @@ if (applyingUpdate) {
     const updating = await updater.checkAndDownload();
     checkingUpdate = false;
     if (updating) return app.exit(0); // o exe novo assume: instala e reabre o programa
+    registerLocalFiles();
     allowFramedPreviews();
     nativeTheme.themeSource = readTheme();
     buildMenu();

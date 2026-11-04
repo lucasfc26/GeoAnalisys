@@ -71,8 +71,11 @@ declare global {
           buttons?: { id: string; label: string; visible: boolean }[];
         }) => void;
       };
-      /** Caminho no disco de um arquivo escolhido (null se não houver) */
-      files?: { pathOf: (file: File) => string | null };
+      /** Caminho no disco de um arquivo escolhido (null se não houver) e abertura no programa padrão */
+      files?: {
+        pathOf: (file: File) => string | null;
+        open?: (url: string) => Promise<string>;
+      };
     };
   }
 }

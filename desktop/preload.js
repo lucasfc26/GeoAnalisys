@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('geoanalisys', {
         return null;
       }
     },
+    // Preview de arquivo local (file:/// ou caminho): abre no programa padrão.
+    open: (url) => ipcRenderer.invoke('files:open', url),
   },
   // Menu Exibir: mostrar/ocultar painel de camadas, mapas de fundo e aba de informações
   view: {

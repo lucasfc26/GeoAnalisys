@@ -19,9 +19,66 @@ export function templateColumns(template: string): string[] {
   return [...template.matchAll(/\{([^{}]+)\}/g)].map((m) => m[1].trim());
 }
 
-/** Sem protocolo (ex.: "www.site.com/x"): assume https. */
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif', 'tif', 'tiff']);
+
+/**
+ * Caminho de um arquivo deste computador: `file:///C:/...`, `C:\...` ou `\\servidor\pasta`.
+ * null quando o texto é um link da web.
+ */
+export function localFilePath(input: string): string | null {
+  const raw = input.trim();
+  if (/^file:/i.test(raw)) {
+    try {
+      const u = new URL(raw);
+      let pathname = u.pathname;
+      try {
+        pathname = decodeURIComponent(pathname);
+      } catch {
+        /* o navegador já devolveu o caminho decodificado */
+      }
+      if (/^\/[A-Za-z]:\//.test(pathname)) pathname = pathname.slice(1);
+      else if (u.hostname) pathname = `//${u.hostname}${pathname}`;
+      return pathname || null;
+    } catch {
+      return null;
+    }
+  }
+  if (/^[A-Za-z]:[\\/]/.test(raw) || /^\\\\[^\\]+\\/.test(raw)) return raw;
+  return null;
+}
+
+/** Endereço que o programa desktop consegue mostrar (o iframe não abre file:///). */
+export function localFileEmbedUrl(filePath: string): string {
+  const norm = filePath.replace(/\\/g, '/');
+  const unc = norm.startsWith('//');
+  const body = (unc ? norm.slice(2) : norm)
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  return unc ? `local-file://local/unc/${body}` : `local-file://local/${body}`;
+}
+
+/** Link file:/// para abrir o arquivo no programa padrão do Windows. */
+export function fileUrlOf(filePath: string): string {
+  const norm = filePath.replace(/\\/g, '/');
+  const unc = norm.startsWith('//');
+  const body = (unc ? norm.slice(2) : norm)
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  return unc ? `file://${body}` : `file:///${body}`;
+}
+
+export function isImageFile(filePath: string): boolean {
+  const ext = /\.([a-z0-9]+)$/i.exec(filePath)?.[1]?.toLowerCase() ?? '';
+  return IMAGE_EXT.has(ext);
+}
+
+/** Sem protocolo (ex.: "www.site.com/x"): assume https. Caminho de arquivo fica como está. */
 function withScheme(url: string): string {
-  return /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`;
+  const raw = url.trim();
+  if (localFilePath(raw)) return raw;
+  return /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
 }
 
 /** Street View sem chave de API (formato embutível) e o link equivalente para abrir no Google Maps. */

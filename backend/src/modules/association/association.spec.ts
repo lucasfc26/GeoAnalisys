@@ -355,6 +355,29 @@ describe('association', () => {
     expect(Array.from(cheap.matchA)).toEqual([1, 2, 3, 4, -1]);
   });
 
+  it('par exato (mesma coordenada, prioridades atendidas) não é desfeito para associar mais', () => {
+    // a0 e b0 na mesma coordenada; a1 só alcança b0 e b1 só alcança a0. Trocar daria 2 pares,
+    // mas desfaz o par perfeito: a1 e b1 ficam sem par.
+    const a = [at(0, 0, ['me', '400']), at(-15, 0, ['me', '400'])];
+    const b = [at(0, 0, ['me', '400']), at(20, 0, ['me', '400'])];
+    const crit = { maxDistance: 25, weight: 10 };
+    const r = associate(a, b, { maxDistance: 25, criteria: [crit, crit] });
+    expect(Array.from(r.matchA)).toEqual([0, -1]);
+    // Valor diferente: não é exato, a troca continua valendo.
+    const b2 = [at(0, 0, ['me', '250']), b[1]];
+    expect(Array.from(associate(a, b2, { maxDistance: 25, criteria: [crit, crit] }).matchA)).toEqual([1, 0]);
+  });
+
+  it('vários pontos na mesma coordenada: todos os pares exatos ficam travados', () => {
+    const v = ['vs', '150'];
+    const a = [at(0, 0, v), at(0, 0, v), at(-15, 0, v)];
+    const b = [at(0, 0, v), at(0, 0, v), at(20, 0, v)];
+    const crit = { maxDistance: 25, weight: 10 };
+    const r = associate(a, b, { maxDistance: 25, criteria: [crit, crit] });
+    expect(r.matchA[2]).toBe(-1);
+    expect([r.matchA[0], r.matchA[1]].sort()).toEqual([0, 1]);
+  });
+
   it('penalidade alta só é quebrada quando não há outra opção', () => {
     const medicao = { maxDistance: 25, weight: 1000 };
     // a0 (medido) tem b0 (não medido) a 2 m e b1 (medido) a 8 m: fica com b1.

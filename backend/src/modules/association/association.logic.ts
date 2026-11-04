@@ -8,6 +8,7 @@
  * Custo de um par = distância + penalidade (em metros) de cada critério não atendido. Cada ponto
  * sem par custa `unmatchedCost`. A associação escolhida é a de menor custo total, olhando todos os
  * pontos juntos (não par a par): um par só "rouba" o ponto de outro se isso diminuir o total.
+ * Exceção: pares exatos (mesma coordenada e todas as prioridades atendidas) ficam travados antes.
  *
  * Resolvido como atribuição retangular (linhas = A; colunas = B + uma coluna "sem par" por linha,
  * custo 2 × unmatchedCost) com caminhos mínimos sucessivos (Dijkstra com potenciais, como no
@@ -186,6 +187,8 @@ const hasCoords = (p: AssocPoint) =>
 
 /** Custo de "sem par" quando não há limite: grande o bastante para valer mais que qualquer par. */
 const NO_LIMIT = 1e9;
+/** Distância (m) até a qual dois pontos estão na mesma coordenada (arredondamentos). */
+const EXACT_DISTANCE = 0.05;
 
 /** Fila de prioridade mínima (heap binário) de colunas por distância, com remoção preguiçosa. */
 class MinHeap {
@@ -383,12 +386,47 @@ export function associate(a: AssocPoint[], b: AssocPoint[], opts: AssocOptions):
   const v = new Float64Array(nCols);
   const edgeCost = (e: number) => (e < 0 ? dummyCost : cc[e]);
 
+  // Pares exatos (mesma coordenada e todas as prioridades atendidas) ficam travados: nenhuma cadeia
+  // de trocas para associar mais pontos desfaz um par perfeito. Quem tem menos opções escolhe
+  // primeiro, para os vários pontos de uma mesma coordenada ficarem todos com par.
+  const allMet = (2 ** opts.criteria.length - 1) >>> 0;
+  const isExact = (e: number) => cd[e] <= EXACT_DISTANCE && cmask[e] === allMet;
+  const exactCount = new Int32Array(nB);
+  const rowExact = new Int32Array(nA);
+  for (let i = 0; i < nA; i++) {
+    for (let e = rowStart[i]; e < rowStart[i + 1]; e++) {
+      if (!isExact(e)) continue;
+      rowExact[i]++;
+      exactCount[cj[e]]++;
+    }
+  }
+  const locked = new Uint8Array(nB);
+  const lockedRow = new Uint8Array(nA);
+  const exactRows: number[] = [];
+  for (let i = 0; i < nA; i++) if (rowExact[i]) exactRows.push(i);
+  exactRows.sort((x, y) => rowExact[x] - rowExact[y] || x - y);
+  for (const i of exactRows) {
+    let pick = -1;
+    for (let e = rowStart[i]; e < rowStart[i + 1]; e++) {
+      if (!isExact(e) || locked[cj[e]]) continue;
+      if (pick < 0 || exactCount[cj[e]] < exactCount[cj[pick]]) pick = e;
+    }
+    if (pick < 0) continue;
+    locked[cj[pick]] = 1;
+    lockedRow[i] = 1;
+    colRow[cj[pick]] = i;
+    rowCol[i] = cj[pick];
+    rowEdge[i] = pick;
+  }
+
   // Início: cada linha no seu par mais barato (empate: ponto de B de menor índice), se estiver
   // livre. Com v = 0, isso é ótimo para as linhas atribuídas. As mais baratas escolhem primeiro.
   const best = new Int32Array(nA).fill(-1);
   const bestCost = new Float64Array(nA).fill(dummyCost);
   for (let i = 0; i < nA; i++) {
+    if (lockedRow[i]) continue;
     for (let e = rowStart[i]; e < rowStart[i + 1]; e++) {
+      if (locked[cj[e]]) continue;
       if (cc[e] < bestCost[i] || (cc[e] === bestCost[i] && best[i] >= 0 && cj[e] < cj[best[i]])) {
         bestCost[i] = cc[e];
         best[i] = e;
@@ -400,6 +438,7 @@ export function associate(a: AssocPoint[], b: AssocPoint[], opts: AssocOptions):
   rows.sort((x, y) => bestCost[x] - bestCost[y] || x - y);
   const pending: number[] = [];
   for (const i of rows) {
+    if (lockedRow[i]) continue;
     const e = best[i];
     const col = e < 0 ? nB + i : cj[e];
     if (colRow[col] < 0) {
@@ -419,7 +458,7 @@ export function associate(a: AssocPoint[], b: AssocPoint[], opts: AssocOptions):
   const heap = new MinHeap();
   const relax = (row: number, base: number) => {
     const visit = (col: number, e: number) => {
-      if (scanned[col]) return;
+      if (scanned[col] || (col < nB && locked[col])) return;
       const alt = base + edgeCost(e) - v[col];
       if (alt < dist[col]) {
         if (dist[col] === Infinity) touched.push(col);
