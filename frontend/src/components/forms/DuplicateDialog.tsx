@@ -68,12 +68,26 @@ export default function DuplicateDialog() {
     const coord = new Set([s.source.xColumn, s.source.yColumn, s.source.geometryColumn]);
     return s.columns.filter((c) => c.kind !== 'geometry' && !coord.has(c.name));
   }, [srcSchema.data]);
+  // ID do destino gerável (numérico: maior da camada + 1; senão, valor automático) não recebe valor.
+  const dstAutoId = useMemo(() => {
+    const s = dstSchema.data;
+    const c = s?.columns.find((c) => c.name === s.source.idColumn);
+    if (!c) return null;
+    const numeric = (c.kind === 'integer' || c.kind === 'number') && !c.isGenerated;
+    return numeric || c.hasDefault ? { name: c.name, numeric } : null;
+  }, [dstSchema.data]);
   const dstCols = useMemo(() => {
     const s = dstSchema.data;
     if (!s) return [];
     const coord = new Set([s.source.xColumn, s.source.yColumn, s.source.geometryColumn]);
-    return s.columns.filter((c) => !c.readOnly && c.kind !== 'geometry' && !coord.has(c.name));
-  }, [dstSchema.data]);
+    return s.columns.filter(
+      (c) =>
+        !c.readOnly &&
+        c.kind !== 'geometry' &&
+        !coord.has(c.name) &&
+        c.name !== dstAutoId?.name,
+    );
+  }, [dstSchema.data, dstAutoId]);
 
   // Pareamento: origem → destino ('' = não copiar), lembrado por par de camadas.
   const [mapping, setMapping] = useState<Mapping>({});
@@ -269,7 +283,17 @@ export default function DuplicateDialog() {
               Escolha, para cada atributo de <b>{source?.name}</b>, o atributo de{' '}
               <b>{target?.name}</b> que vai receber o valor. Em branco, o atributo{' '}
               <b>não é copiado</b>. A posição é sempre copiada (convertida para o sistema de
-              coordenadas do destino). {fmtInt(pairs)} de {fmtInt(srcCols.length)} pareado(s).
+              coordenadas do destino).
+              {dstAutoId && (
+                <>
+                  {' '}
+                  O ID (<b>{dstAutoId.name}</b>) das cópias é gerado em <b>{target?.name}</b>
+                  {dstAutoId.numeric
+                    ? ': maior ID da camada + 1, em sequência.'
+                    : ' pelo valor automático da coluna.'}
+                </>
+              )}{' '}
+              {fmtInt(pairs)} de {fmtInt(srcCols.length)} pareado(s).
             </p>
 
             <div className="scroll-thin max-h-80 overflow-auto rounded-md border border-slate-200">

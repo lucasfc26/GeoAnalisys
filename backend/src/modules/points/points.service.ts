@@ -1672,10 +1672,15 @@ export class PointsService {
     const coordCols = new Set(
       [dst.xCol, dst.yCol, dst.geomCol].flatMap((c) => (c ? [c.name] : [])),
     );
+    // ID gerável no destino (numérico: maior da camada + 1; senão, valor automático): nunca copia o
+    // ID da origem, mesmo pareado.
+    const autoId =
+      ((dst.idCol.kind === 'integer' || dst.idCol.kind === 'number') && !dst.idCol.isGenerated) ||
+      dst.idCol.hasDefault;
     const pairs: { from: string; to: ColumnMeta }[] = [];
     const used = new Set<string>();
     for (const [from, to] of Object.entries(mapping ?? {})) {
-      if (!to) continue;
+      if (!to || (autoId && to === dst.idCol.name)) continue;
       if (!src.colMap.has(from))
         throw new BadRequestException(`Coluna "${from}" não existe na origem`);
       const col = dst.colMap.get(to);
@@ -1709,7 +1714,7 @@ export class PointsService {
         const c = coerceFor(p.to, r.data[p.from]);
         if (c.invalid) invalid[p.to.name] = (invalid[p.to.name] ?? 0) + 1;
         // ID vazio: o destino gera um (como em Adicionar ponto).
-        if (p.to === dst.idCol && c.value === null) continue;
+        if (p.to.name === dst.idCol.name && c.value === null) continue;
         data[p.to.name] = c.value;
       }
       rows.push(data);
