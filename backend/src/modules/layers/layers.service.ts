@@ -6,6 +6,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ColumnMeta, Params, castType, pgis, qi, qualified } from '../../common/sql';
+import { coerceFor } from '../points/copy.logic';
+import { buildAppendPlan } from './append.plan';
 import {
   ConvertedField,
   convertedFields,
@@ -85,6 +87,81 @@ interface ImportJob extends ImportJobStatus {
   userId: string;
   cancel: boolean;
   finishedAt?: number;
+}
+
+/** Gravação de um arquivo numa tabela que já é fonte de dados. */
+export interface AppendConfig {
+  sheet?: string | null;
+  /** null = detectar (UTF-8 ou Windows-1252). Só vale para CSV/TXT. */
+  encoding?: string | null;
+  /** Apaga as linhas atuais antes de gravar. */
+  truncate?: boolean;
+  /** Coluna da tabela → coluna do arquivo. Vazio = não importar essa coluna. */
+  mapping: Record<string, string | null | undefined>;
+}
+
+export interface AppendResult {
+  rows: number;
+  truncated: boolean;
+  /** Valores que não cabiam no tipo da coluna (ficaram vazios), por coluna */
+  invalid: Record<string, number>;
+}
+
+export interface AppendJobStatus {
+  id: string;
+  phase: 'reading' | 'done' | 'error' | 'cancelled';
+  rows: number;
+  percent: number;
+  result?: AppendResult;
+  error?: string;
+}
+
+interface AppendJob extends AppendJobStatus {
+  userId: string;
+  cancel: boolean;
+  finishedAt?: number;
+}
+
+/** Valor da célula como texto para o CAST da coluna; vazio quando não cabe no tipo. */
+function storedCell(col: ColumnMeta, raw: Cell): { text: string | null; invalid: boolean } {
+  if (raw === null || raw === undefined || raw === '') return { text: null, invalid: false };
+  if (col.kind === 'json') {
+    const text = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    try {
+      JSON.parse(text);
+      return { text, invalid: false };
+    } catch {
+      return { text: null, invalid: true };
+    }
+  }
+  const { value, invalid } = coerceFor(col, raw);
+  if (value === null || value === undefined) return { text: null, invalid };
+  if (typeof value === 'boolean') return { text: value ? 'true' : 'false', invalid };
+  if (typeof value === 'number') return { text: String(value), invalid };
+  if (typeof value === 'object') return { text: JSON.stringify(value), invalid };
+  return { text: String(value), invalid };
+}
+
+/** Mensagem de banco para quem está importando (chave repetida, tipo, coluna obrigatória). */
+function appendDbMessage(e: unknown, already: number): string {
+  const err = e as { message?: string; meta?: { code?: string } };
+  const code = err.meta?.code ?? '';
+  const msg = err.message ?? '';
+  const partial = already > 0 ? ` ${already} linha(s) já tinham sido gravadas.` : '';
+  if (code === '23505' || msg.includes('23505')) {
+    return `Há valores repetidos na chave da tabela. Trunque os dados atuais ou ajuste a coluna de ID no arquivo.${partial}`;
+  }
+  if (code === '23502' || msg.includes('23502')) {
+    return `Faltou valor numa coluna obrigatória.${partial}`;
+  }
+  if (code === '22003' || msg.includes('22003') || code === '22P02' || msg.includes('22P02')) {
+    return `Um valor não cabe no tipo da coluna da tabela.${partial}`;
+  }
+  if (code === '23503' || msg.includes('23503')) {
+    return `A tabela não pode ser esvaziada: outros registros dependem dela.${partial}`;
+  }
+  const clean = msg.replace(/^[\s\S]*?ERROR:\s*/, '').split('\n')[0];
+  return (clean || 'Erro ao gravar na tabela') + partial;
 }
 
 class ImportCancelled extends Error {}
@@ -197,6 +274,8 @@ export class LayersService {
   private readonly uploads = new Map<string, StoredUpload & { at: number }>();
   /** Importações em andamento ou recém-terminadas, por id. */
   private readonly jobs = new Map<string, ImportJob>();
+  /** Importações para uma tabela que já existe (acrescentar ou truncar). */
+  private readonly appendJobs = new Map<string, AppendJob>();
 
   /** Guarda o arquivo recebido (já gravado em disco pelo upload) e devolve o id dele. */
   private keepUpload(file: StoredUpload | undefined) {
@@ -229,11 +308,14 @@ export class LayersService {
     for (const [id, j] of this.jobs) {
       if (j.finishedAt && now - j.finishedAt > JOB_TTL_MS) this.jobs.delete(id);
     }
+    for (const [id, j] of this.appendJobs) {
+      if (j.finishedAt && now - j.finishedAt > JOB_TTL_MS) this.appendJobs.delete(id);
+    }
   }
 
-  private async open(u: StoredUpload, sheet?: string | null) {
+  private async open(u: StoredUpload, sheet?: string | null, encoding?: string | null) {
     try {
-      return await openRows(u.path, u.originalname, sheet);
+      return await openRows(u.path, u.originalname, sheet, encoding);
     } catch (e) {
       if (e instanceof ImportFileError) throw new BadRequestException(e.message);
       throw e;
@@ -279,10 +361,15 @@ export class LayersService {
    * o arquivo (que fica guardado) ou o id de um já enviado (ex.: trocar de aba). Só o começo do
    * arquivo é lido: `total` só vem quando o arquivo inteiro coube na amostra.
    */
-  async preview(file: StoredUpload | undefined, uploadId?: string | null, sheet?: string | null) {
+  async preview(
+    file: StoredUpload | undefined,
+    uploadId?: string | null,
+    sheet?: string | null,
+    encoding?: string | null,
+  ) {
     const id = file ? this.keepUpload(file) : uploadId!;
     const u = this.upload(id);
-    const src = await this.open(u, sheet);
+    const src = await this.open(u, sheet, encoding);
     const { data, ended } = await this.sample(src, PREVIEW_SAMPLE);
     src.close();
     const types = inferTypes(data);
@@ -444,6 +531,174 @@ export class LayersService {
     if (!job || job.userId !== userId) throw new NotFoundException('Importação não encontrada');
     job.cancel = true;
     return { cancelled: true };
+  }
+
+  // ---------------------------------------------------------------- acrescentar numa tabela existente
+
+  /**
+   * Começa a gravar o arquivo enviado na tabela da fonte: acrescenta linhas, ou esvazia a tabela
+   * antes (`truncate`). `mapping` liga cada coluna da tabela a uma coluna do arquivo.
+   */
+  async startAppend(sourceId: string, uploadId: string, cfg: AppendConfig, userId: string) {
+    if (!uploadId) throw new BadRequestException('Envie o arquivo de novo');
+    const ctx = await this.sources.context(sourceId, true);
+    await this.assertTable(ctx.source.schema, ctx.source.tableName);
+    const u = this.upload(uploadId);
+    const src = await this.open(u, cfg.sheet, cfg.encoding);
+    const { data, ended } = await this.sample(src, IMPORT_SAMPLE);
+    let plan: ReturnType<typeof buildAppendPlan>;
+    try {
+      if (!data.rows.length && ended) {
+        throw new BadRequestException('A planilha não tem linhas de dados (só o cabeçalho)');
+      }
+      plan = buildAppendPlan(ctx.columns, data.headers, cfg.mapping ?? {});
+    } catch (e) {
+      src.close();
+      throw e;
+    }
+    this.sweep();
+    const job: AppendJob = {
+      id: randomUUID(),
+      userId,
+      phase: 'reading',
+      rows: 0,
+      percent: 0,
+      cancel: false,
+    };
+    this.appendJobs.set(job.id, job);
+    void this.runAppend(job, src, data, ended, plan, ctx.table, !!cfg.truncate, uploadId, sourceId);
+    return { jobId: job.id };
+  }
+
+  appendStatus(jobId: string, userId: string): AppendJobStatus {
+    const job = this.appendJobs.get(jobId);
+    if (!job || job.userId !== userId) throw new NotFoundException('Importação não encontrada');
+    const { id, phase, rows, percent, result, error } = job;
+    return { id, phase, rows, percent, result, error };
+  }
+
+  /** Para de gravar. Linhas já inseridas permanecem; se a tabela foi truncada, isso não desfaz. */
+  cancelAppend(jobId: string, userId: string) {
+    const job = this.appendJobs.get(jobId);
+    if (!job || job.userId !== userId) throw new NotFoundException('Importação não encontrada');
+    job.cancel = true;
+    return { cancelled: true };
+  }
+
+  /** Views e materializadas não recebem INSERT. */
+  private async assertTable(schema: string, table: string) {
+    const rows = await this.prisma.$queryRawUnsafe<{ kind: string }[]>(
+      `SELECT c.relkind::text AS kind
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2`,
+      schema,
+      table,
+    );
+    const kind = rows[0]?.kind;
+    if (kind !== 'r' && kind !== 'p') {
+      throw new BadRequestException(
+        'Só é possível importar para uma tabela. Views não recebem dados.',
+      );
+    }
+  }
+
+  /** Lê o arquivo e grava na tabela já existente, em partes. */
+  private async runAppend(
+    job: AppendJob,
+    src: RowSource,
+    data: Sheet,
+    ended: boolean,
+    plan: ReturnType<typeof buildAppendPlan>,
+    table: string,
+    truncate: boolean,
+    uploadId: string,
+    sourceId: string,
+  ) {
+    const invalid: Record<string, number> = {};
+    const overriding = plan.columns.some((c) => c.isIdentity) ? 'OVERRIDING SYSTEM VALUE' : '';
+    const recordset = plan.columns.map((_, i) => `"k${i}" text`).join(', ');
+    const select = plan.columns
+      .map((c, i) => {
+        const ref = `r."k${i}"`;
+        return c.kind === 'json' ? `${ref}::jsonb` : `${ref}::${castType(c)}`;
+      })
+      .join(', ');
+    const sql = `INSERT INTO ${table} (${plan.columns.map((c) => qi(c.name)).join(', ')}) ${overriding}
+      SELECT ${select}
+        FROM jsonb_to_recordset($1::jsonb) AS r(${recordset})`;
+    let batch: Record<string, string | null>[] = [];
+    const flush = async () => {
+      if (!batch.length) return;
+      try {
+        await this.prisma.$executeRawUnsafe(sql, JSON.stringify(batch));
+      } catch (e) {
+        throw new Error(appendDbMessage(e, job.rows));
+      }
+      job.rows += batch.length;
+      job.percent = src.progress();
+      batch = [];
+      if (job.cancel) throw new ImportCancelled();
+    };
+    const add = (raw: Cell[]) => {
+      const row = fitRow(raw, data.headers.length);
+      const o: Record<string, string | null> = {};
+      plan.columns.forEach((col, i) => {
+        const cell = storedCell(col, row[plan.indexes[i]] ?? null);
+        if (cell.invalid) invalid[col.name] = (invalid[col.name] ?? 0) + 1;
+        o[`k${i}`] = cell.text;
+      });
+      batch.push(o);
+    };
+    try {
+      if (truncate) {
+        try {
+          await this.prisma.$executeRawUnsafe(`TRUNCATE TABLE ${table} RESTART IDENTITY`);
+        } catch (e) {
+          throw new Error(appendDbMessage(e, 0));
+        }
+      }
+      for (const r of data.rows) {
+        if (job.cancel) throw new ImportCancelled();
+        add(r);
+        if (batch.length >= BATCH_ROWS) await flush();
+      }
+      if (!ended) {
+        for await (const raw of src.rows) {
+          if (job.cancel) throw new ImportCancelled();
+          add(raw);
+          if (batch.length >= BATCH_ROWS) await flush();
+        }
+      }
+      await flush();
+      src.close();
+      job.percent = 1;
+      await this.prisma.$executeRawUnsafe(`ANALYZE ${table}`).catch(() => undefined);
+      await this.prisma.auditLog
+        .create({
+          data: {
+            userId: job.userId,
+            action: truncate ? 'TRUNCATE_IMPORT' : 'APPEND_IMPORT',
+            entity: 'DataSource',
+            entityId: sourceId,
+            sourceId,
+            newValue: { rows: job.rows, invalid },
+          },
+        })
+        .catch(() => undefined);
+      job.result = { rows: job.rows, truncated: truncate, invalid };
+      job.phase = 'done';
+    } catch (e) {
+      src.close();
+      if (e instanceof ImportCancelled) job.phase = 'cancelled';
+      else {
+        job.phase = 'error';
+        job.error = (e as Error).message || 'Erro ao importar';
+        this.logger.error(`Importação na tabela ${job.id}: ${job.error}`);
+      }
+    } finally {
+      job.finishedAt = Date.now();
+      if (job.phase === 'done') this.dropUpload(uploadId);
+    }
   }
 
   /**

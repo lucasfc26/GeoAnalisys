@@ -175,7 +175,7 @@ export function HoldMenuButton({
             ref={menuRef}
             role="menu"
             style={menu}
-            className="fixed z-50 min-w-56 rounded-md border border-slate-200 bg-white py-1 shadow-xl"
+            className="fixed z-[100000] min-w-56 rounded-md border border-slate-200 bg-white py-1 shadow-xl"
           >
             {items.map((it, i) => (
               <div key={it.key}>

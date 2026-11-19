@@ -52,11 +52,31 @@ for (const [canon, list] of Object.entries(SYNONYMS)) {
 }
 const STOP = new Set(['de', 'da', 'do', 'das', 'dos', 'e', 'the', 'of']);
 
+/** Sem acento, minúsculo e sem separador: "UTM X" e "utm_x" viram "utmx". */
+function flatName(name: string): string {
+  return name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Papel de coordenada. Neste cadastro UTMX fica no lugar da latitude e UTMY no da longitude
+ * (o arquivo traz o valor projetado na coluna geográfica da tabela).
+ */
+function coordRole(name: string): 'latitude' | 'longitude' | null {
+  const n = flatName(name);
+  if (/^(lat|latitude|utmx|coordx|coordenadax)$/.test(n)) return 'latitude';
+  if (/^(lon|lng|long|longitude|utmy|coordy|coordenaday)$/.test(n)) return 'longitude';
+  return null;
+}
+
 /** Palavras do nome: sem acentos, separando camelCase, _ e números, com sinônimos padronizados. */
 export function nameTokens(name: string): string[] {
   return name
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/([a-zA-Z])(\d)/g, '$1 $2')
     .replace(/(\d)([a-zA-Z])/g, '$1 $2')
@@ -64,6 +84,27 @@ export function nameTokens(name: string): string[] {
     .split(/[^a-z0-9]+/)
     .filter((t) => t && !STOP.has(t))
     .map((t) => CANON.get(t) ?? t);
+}
+
+/**
+ * Mesma quantidade de palavras, e cada uma é igual ou um prefixo da outra (placa ≈ placall).
+ * 0 quando a estrutura não acompanha.
+ */
+function prefixTokenScore(ta: string[], tb: string[]): number {
+  if (!ta.length || ta.length !== tb.length) return 0;
+  let soft = 0;
+  for (let i = 0; i < ta.length; i++) {
+    const x = ta[i];
+    const y = tb[i];
+    if (x === y) continue;
+    const [s, l] = x.length <= y.length ? [x, y] : [y, x];
+    if (s.length >= 3 && l.startsWith(s) && l.length - s.length <= 4) {
+      soft++;
+      continue;
+    }
+    return 0;
+  }
+  return soft ? 0.92 : 0;
 }
 
 function bigrams(s: string): Map<string, number> {
@@ -94,6 +135,9 @@ export function nameSimilarity(a: string, b: string): number {
   const jb = tb.join('');
   if (!ja || !jb) return 0;
   if (ja === jb) return 1;
+  const roleA = coordRole(a);
+  const roleB = coordRole(b);
+  if (roleA && roleB) return roleA === roleB ? 0.98 : 0.15;
   const sa = new Set(ta);
   const sb = new Set(tb);
   const inter = [...sa].filter((t) => sb.has(t)).length;
@@ -101,7 +145,7 @@ export function nameSimilarity(a: string, b: string): number {
   const [short, long] = ja.length <= jb.length ? [ja, jb] : [jb, ja];
   const contained =
     short.length >= 3 && long.includes(short) ? 0.7 + 0.2 * (short.length / long.length) : 0;
-  return Math.max(jaccard * 0.95, dice(ja, jb) * 0.9, contained);
+  return Math.max(jaccard * 0.95, dice(ja, jb) * 0.9, contained, prefixTokenScore(ta, tb));
 }
 
 const isNumeric = (k: ColumnKind) => k === 'integer' || k === 'number';
@@ -128,7 +172,7 @@ const valueKey = (v: unknown) =>
     .trim()
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '');
+    .replace(/[\u0300-\u036f]/g, '');
 
 /** Valores em comum nas amostras: |A ∩ B| / min(|A|, |B|); 0 com poucos valores distintos. */
 export function valueOverlap(a: unknown[], b: unknown[]): number {
@@ -168,7 +212,10 @@ export function smartPair(
           reason = `${name >= 0.4 ? `${reason} e ` : ''}valores em comum (${Math.round(overlap * 100)}%)`;
         }
       }
-      const score = base * typeFit(s, t, sv);
+      const fit = typeFit(s, t, sv);
+      // Nome quase igual (espaço, acento, abreviação, prefixo) não se perde por o arquivo ter sido lido como texto.
+      let score = base * fit;
+      if (name >= 0.85) score = Math.max(score, name * 0.9);
       if (score >= MIN_SCORE) candidates.push({ source: s.name, target: t.name, score, reason });
     }
   }

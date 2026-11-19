@@ -9,11 +9,9 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { isTopWindowZ, nextWindowZ } from '@/hooks/useWindowFrame';
 import { closePanelWindow, openPanelWindow } from '@/lib/detachedWindows';
 import { toast } from './Toaster';
-
-/** Ordem de empilhamento das janelas flutuantes (a mais recente/clicada por cima). */
-let topZ = 0;
 
 const clamp = (v: number, min: number, max: number) =>
   Math.min(Math.max(v, min), Math.max(min, max));
@@ -77,9 +75,10 @@ export function FloatingPanel({
   const [popup, setPopup] = useState<{ win: Window; root: HTMLElement } | null>(null);
   const titleRef = useRef<HTMLSpanElement>(null);
   // Várias janelas abertas: a última clicada fica por cima.
-  const [z, setZ] = useState(() => ++topZ);
+  const [z, setZ] = useState(nextWindowZ);
   const raise = () => {
-    if (z !== topZ) setZ(++topZ);
+    // A mais à frente de todas as janelas (diálogos e painéis compartilham a ordem).
+    if (!isTopWindowZ(z)) setZ(nextWindowZ());
   };
 
   /** Arrastando o painel para fora da janela principal: soltar ali o destaca. */
@@ -168,8 +167,13 @@ export function FloatingPanel({
     const r = el.getBoundingClientRect();
     const pr = parent.getBoundingClientRect();
     const s = { x: r.left - pr.left, y: r.top - pr.top, w: r.width, h: r.height };
-    const minW = Math.min(resizable?.minWidth ?? 0, pr.width);
-    const minH = Math.min(resizable?.minHeight ?? 0, pr.height);
+    // Limites da tela inteira (em coordenadas do pai): o painel pode cobrir as barras laterais.
+    const bx0 = -pr.left;
+    const bx1 = window.innerWidth - pr.left;
+    const by0 = -pr.top;
+    const by1 = window.innerHeight - pr.top;
+    const minW = Math.min(resizable?.minWidth ?? 0, window.innerWidth);
+    const minH = Math.min(resizable?.minHeight ?? 0, window.innerHeight);
     const sx = e.clientX;
     const sy = e.clientY;
     // Ponto do painel em que foi agarrado (para a janela separada abrir sob o mouse).
@@ -197,18 +201,18 @@ export function FloatingPanel({
           setLeaving(out);
         }
         // Mantém o cabeçalho sempre visível.
-        setPos({ x: clamp(s.x + dx, 0, pr.width - s.w), y: clamp(s.y + dy, 0, pr.height - 40) });
+        setPos({ x: clamp(s.x + dx, bx0, bx1 - s.w), y: clamp(s.y + dy, by0, by1 - 40) });
         return;
       }
       let { x, y, w, h } = s;
-      if (dir.includes('e')) w = clamp(s.w + dx, minW, pr.width - s.x);
+      if (dir.includes('e')) w = clamp(s.w + dx, minW, bx1 - s.x);
       if (dir.includes('w')) {
-        w = clamp(s.w - dx, minW, s.x + s.w);
+        w = clamp(s.w - dx, minW, s.x + s.w - bx0);
         x = s.x + s.w - w;
       }
-      if (dir.includes('s')) h = clamp(s.h + dy, minH, pr.height - s.y);
+      if (dir.includes('s')) h = clamp(s.h + dy, minH, by1 - s.y);
       if (dir.includes('n')) {
-        h = clamp(s.h - dy, minH, s.y + s.h);
+        h = clamp(s.h - dy, minH, s.y + s.h - by0);
         y = s.y + s.h - h;
       }
       setPos({ x, y });
@@ -234,7 +238,7 @@ export function FloatingPanel({
       ref={ref}
       onPointerDownCapture={raise}
       style={{
-        zIndex: 20 + (z % 1000),
+        zIndex: z,
         ...(!pos && defaultStyle),
         ...(pos && { left: pos.x, top: pos.y, marginRight: 0 }),
         ...(size && { width: size.w, height: size.h, maxWidth: 'none' }),

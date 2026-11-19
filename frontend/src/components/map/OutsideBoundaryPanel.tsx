@@ -15,6 +15,8 @@ import { fmtInt } from '@/utils/format';
 import { PX_PER_CM, fmtDistance } from '@/utils/geo';
 import { Button } from '../ui/Button';
 import { FloatingPanel } from '../ui/FloatingPanel';
+import { KeepZoomToggle } from './KeepZoomToggle';
+
 import { findElementById } from '@/lib/detachedWindows';
 
 /** Motivo sugerido ao excluir um registro pela lista (pode ser reescrito) */
@@ -52,15 +54,18 @@ export function OutsideBoundaryPanel() {
       className="h-[70%] w-[26rem] max-w-[calc(100%-1.5rem)]"
       resizable={{ minWidth: 8 * PX_PER_CM, minHeight: 5 * PX_PER_CM }}
       actions={
-        <button
-          type="button"
-          onClick={() => openDialog('outsideBoundary', true)}
-          className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-          title="Parâmetros"
-          aria-label="Parâmetros"
-        >
-          <Settings2 className="size-4" />
-        </button>
+        <>
+          <KeepZoomToggle />
+          <button
+            type="button"
+            onClick={() => openDialog('outsideBoundary', true)}
+            className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            title="Parâmetros"
+            aria-label="Parâmetros"
+          >
+            <Settings2 className="size-4" />
+          </button>
+        </>
       }
       footer={
         <div className="flex flex-wrap items-center gap-1.5">

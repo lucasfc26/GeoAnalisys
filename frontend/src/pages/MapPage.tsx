@@ -148,8 +148,8 @@ function Workspace() {
       {bar('top')}
       <div className="relative flex min-h-0 flex-1">
         {bar('left')}
-        {/* isolate: o empilhamento das janelas flutuantes fica restrito à área do mapa. */}
-        <main className="relative isolate min-w-0 flex-1">
+        {/* Sem isolate: as janelas flutuantes podem cobrir as barras laterais e o painel de informações. */}
+        <main className="relative min-w-0 flex-1">
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center">

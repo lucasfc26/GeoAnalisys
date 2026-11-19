@@ -21,6 +21,8 @@ import type { SelectedGroup } from '@/types';
 import { coordKey, fmtInt } from '@/utils/format';
 import { PX_PER_CM, boundsOfPoints } from '@/utils/geo';
 import { FloatingPanel } from '../ui/FloatingPanel';
+import { KeepZoomToggle } from './KeepZoomToggle';
+
 import { Button } from '../ui/Button';
 import { toast } from '../ui/Toaster';
 import { findElementById } from '@/lib/detachedWindows';
@@ -51,7 +53,7 @@ function selectPairs(aId: string, bId: string, aPoints: ReviewPoint[], bPoints: 
   st.setSelection(groupsOf(aPoints));
   st.setOtherSelection({ [bId]: Object.fromEntries(groupsOf(bPoints).map((g) => [g.key, g])) });
   const b = boundsOfPoints([...aPoints, ...bPoints]);
-  if (b) st.focusMap({ bounds: b });
+  if (b) st.focusMap({ bounds: b, fromTool: true });
 }
 
 /**
@@ -137,15 +139,18 @@ function Panel({
       className="h-[70%] w-[30rem] max-w-[calc(100%-1.5rem)]"
       resizable={{ minWidth: 10 * PX_PER_CM, minHeight: 5 * PX_PER_CM }}
       actions={
-        <button
-          type="button"
-          onClick={() => openDialog('associate', true)}
-          className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-          title="Parâmetros"
-          aria-label="Parâmetros"
-        >
-          <Settings2 className="size-4" />
-        </button>
+        <>
+          <KeepZoomToggle />
+          <button
+            type="button"
+            onClick={() => openDialog('associate', true)}
+            className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            title="Parâmetros"
+            aria-label="Parâmetros"
+          >
+            <Settings2 className="size-4" />
+          </button>
+        </>
       }
       footer={
         <div className="flex flex-wrap items-center gap-1.5">

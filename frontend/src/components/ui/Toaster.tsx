@@ -36,7 +36,7 @@ const icons = {
 export function Toaster() {
   const { items, dismiss } = useToasts();
   return (
-    <div className="pointer-events-none fixed right-4 bottom-20 z-[60] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2 lg:bottom-4">
+    <div className="pointer-events-none fixed right-4 bottom-20 z-[100000] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2 lg:bottom-4">
       {items.map((t) => (
         <div
           key={t.id}

@@ -9,6 +9,41 @@ describe('Pareamento Inteligente', () => {
     expect(nameSimilarity('tipo_lampada', 'TipoLâmpada')).toBe(1);
     expect(nameSimilarity('medidor', 'medidor_nc')).toBeGreaterThan(0.6);
     expect(nameSimilarity('bairro', 'potencia')).toBeLessThan(0.3);
+    expect(nameSimilarity('circuito_exclusivo', 'circuito exclusivo')).toBe(1);
+    expect(nameSimilarity('rele_agrupado', 'relé agrupado')).toBe(1);
+    expect(nameSimilarity('cod_cidade', 'Código Cidade')).toBe(1);
+    expect(nameSimilarity('id_pm_placa', 'ID_PM_Placa')).toBe(1);
+    expect(nameSimilarity('ID_PM_Placall', 'ID_PM_Placa')).toBeGreaterThan(0.9);
+    expect(nameSimilarity('latitude', 'UTMX')).toBeGreaterThan(0.9);
+    expect(nameSimilarity('longitude', 'UTM Y')).toBeGreaterThan(0.9);
+    expect(nameSimilarity('latitude', 'UTMY')).toBeLessThan(0.3);
+    expect(nameSimilarity('longitude', 'UTM_X')).toBeLessThan(0.3);
+  });
+
+  it('importação: espaço, prefixo e UTM no lugar de lat/long', () => {
+    const src = [
+      { name: 'circuito exclusivo', kind: 'text' as const },
+      { name: 'relé agrupado', kind: 'text' as const },
+      { name: 'cod_cidade', kind: 'text' as const },
+      { name: 'ID_PM_Placa', kind: 'text' as const },
+      { name: 'UTMX', kind: 'number' as const },
+      { name: 'UTMY', kind: 'number' as const },
+    ];
+    const dst = [
+      { name: 'circuito_exclusivo', kind: 'text' as const },
+      { name: 'rele_agrupado', kind: 'text' as const },
+      { name: 'Código Cidade', kind: 'integer' as const },
+      { name: 'ID_PM_Placall', kind: 'text' as const },
+      { name: 'latitude', kind: 'number' as const },
+      { name: 'longitude', kind: 'number' as const },
+    ];
+    const pairs = Object.fromEntries(smartPair(src, dst).map((m) => [m.target, m.source]));
+    expect(pairs.circuito_exclusivo).toBe('circuito exclusivo');
+    expect(pairs.rele_agrupado).toBe('relé agrupado');
+    expect(pairs['Código Cidade']).toBe('cod_cidade');
+    expect(pairs.ID_PM_Placall).toBe('ID_PM_Placa');
+    expect(pairs.latitude).toBe('UTMX');
+    expect(pairs.longitude).toBe('UTMY');
   });
 
   it('tipos: texto numérico cabe em número; texto livre não', () => {

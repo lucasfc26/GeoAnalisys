@@ -84,10 +84,11 @@ class LayersController {
     @UploadedFile() file: StoredUpload | undefined,
     @Body('uploadId') uploadId?: string,
     @Body('sheet') sheet?: string,
+    @Body('encoding') encoding?: string,
   ) {
     if (!file && !uploadId)
       throw new BadRequestException('Envie um arquivo .csv, .xlsx, .geojson ou .kml');
-    return this.layers.preview(file, uploadId || null, sheet || null);
+    return this.layers.preview(file, uploadId || null, sheet || null, encoding || null);
   }
 
   @Post('import')
@@ -121,6 +122,57 @@ class LayersController {
   @ApiOperation({ summary: 'Cancela a importação (a tabela criada é apagada)' })
   cancelImport(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: string) {
     return this.layers.cancelImport(id, user);
+  }
+
+  @Post(':sourceId/append')
+  @ApiOperation({
+    summary:
+      'Acrescenta (ou substitui, se truncate) as linhas de um CSV/TXT/XLSX já enviado na tabela da fonte, com as colunas associadas',
+  })
+  append(
+    @Param('sourceId') sourceId: string,
+    @Body('uploadId') uploadId: string,
+    @Body('sheet') sheet: string | null | undefined,
+    @Body('encoding') encoding: string | null | undefined,
+    @Body('truncate') truncate: boolean | string | undefined,
+    @Body('mapping') mapping: Record<string, string> | string | undefined,
+    @CurrentUser() user: string,
+  ) {
+    if (typeof uploadId !== 'string' || !uploadId) {
+      throw new BadRequestException('Envie o arquivo de novo');
+    }
+    let parsed: Record<string, string>;
+    try {
+      parsed = typeof mapping === 'string' ? (JSON.parse(mapping) as Record<string, string>) : (mapping ?? {});
+    } catch {
+      throw new BadRequestException('Associação de colunas inválida');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new BadRequestException('Associe as colunas da tabela com as do arquivo');
+    }
+    return this.layers.startAppend(
+      sourceId,
+      uploadId,
+      {
+        sheet: sheet || null,
+        encoding: encoding || null,
+        truncate: truncate === true || truncate === 'true',
+        mapping: parsed,
+      },
+      user,
+    );
+  }
+
+  @Get('append/jobs/:id')
+  @ApiOperation({ summary: 'Andamento da importação para uma tabela existente' })
+  appendStatus(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: string) {
+    return this.layers.appendStatus(id, user);
+  }
+
+  @Delete('append/jobs/:id')
+  @ApiOperation({ summary: 'Para a importação para a tabela existente (linhas já gravadas permanecem)' })
+  cancelAppend(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: string) {
+    return this.layers.cancelAppend(id, user);
   }
 
   @Post('copy')

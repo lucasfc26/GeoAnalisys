@@ -37,6 +37,16 @@ describe('importação em partes', () => {
     expect(sniffEncoding(Buffer.from([0x65, 0xe7, 0x61]))).toBe('windows-1252');
   });
 
+  it('respeita a codificação pedida: ISO-8859-1 não vira euro, Windows-1252 vira', async () => {
+    const path = join(dir, 'moeda.csv');
+    writeFileSync(path, Buffer.concat([Buffer.from('nome\n', 'ascii'), Buffer.from([0x80, 0x0a])]));
+    const iso = await openRows(path, 'moeda.csv', null, 'iso-8859-1');
+    expect((await all(iso))[1][0]).toBe('\u0080');
+    const win = await openRows(path, 'moeda.csv', null, 'windows-1252');
+    expect((await all(win))[1][0]).toBe('€');
+    await expect(openRows(path, 'moeda.csv', null, 'ebcdic')).rejects.toThrow(/Codificação/);
+  });
+
   it('tipo detectado alarga: inteiro → decimal → texto', () => {
     expect(widenType('integer', 5)).toBe('integer');
     expect(widenType('integer', '2,5')).toBe('number');

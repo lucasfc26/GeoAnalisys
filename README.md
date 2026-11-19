@@ -116,5 +116,8 @@ frontend/src/
 Docker/Nginx (substituídos por `npm run start`), importação (Shapefile/KML/Excel), heatmap,
 medições, usuários/permissões completos e testes E2E automatizados no repositório.
 
+[Environment]::SetEnvironmentVariable("GH_TOKEN","COLE_O_TOKEN_AQUI","User")
+ou
+$env:GH_TOKEN="COLE_O_TOKEN_AQUI"
 
 npm.cmd run start

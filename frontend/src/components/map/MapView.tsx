@@ -139,6 +139,15 @@ function FocusController() {
   const focus = useAppStore((s) => s.focus);
   useEffect(() => {
     if (!map || !focus) return;
+    // Lista/busca com "manter o zoom": só leva o centro do ponto (ou do conjunto) para o meio.
+    if (focus.fromTool && useAppStore.getState().keepZoom) {
+      const b = focus.bounds;
+      const c = b
+        ? { lat: (b.minLat + b.maxLat) / 2, lng: (b.minLng + b.maxLng) / 2 }
+        : focus.center;
+      if (c) map.easeTo({ center: [c.lng, c.lat], zoom: map.getZoom(), duration: 300 });
+      return;
+    }
     if (focus.bounds) {
       const b = focus.bounds;
       if (b.minLat === b.maxLat && b.minLng === b.maxLng) {
@@ -547,9 +556,94 @@ export default function MapView() {
     };
   }, [map]);
 
+  /**
+   * Retângulo/polígono com "camada de cima" ou "todas as camadas": consulta as camadas visíveis
+   * (de cima para baixo). Camada de cima = a primeira com pontos na região; todas = todas com
+   * pontos. A camada ativa, se tiver pontos, continua ativa; senão a de cima passa a ser.
+   */
+  const onPolygonMulti = async (
+    polygon: LatLng[],
+    mode: SelectionMode,
+    target: 'top' | 'all',
+  ) => {
+    const visible = runtimes.filter((r) => r.layer.visible && r.prepared);
+    if (!visible.length) {
+      toast.info('Nenhuma camada visível.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const results = await Promise.all(
+        visible.map(async (r) => {
+          const res = await pointsService.selection(
+            r.layer.sourceId,
+            polygon,
+            r.selectionFilters ?? [],
+          );
+          const groups: SelectedGroup[] = res.groups.map(({ key, x, y, lat, lng, ids }) => ({
+            key,
+            x,
+            y,
+            lat,
+            lng,
+            ids,
+          }));
+          return { id: r.layer.sourceId, groups, count: res.count, truncated: res.truncated };
+        }),
+      );
+      let hits = results.filter((r) => r.count > 0);
+      if (target === 'top') hits = hits.slice(0, 1);
+      const store = useAppStore.getState();
+      if (!hits.length) {
+        if (mode === 'replace') {
+          store.clearSelection();
+          store.setOtherSelection({});
+        }
+        toast.info('Nenhum ponto na região selecionada.');
+        return;
+      }
+      const activeId = store.sourceId;
+      const main = hits.find((h) => h.id === activeId) ?? hits[0];
+      const others = hits.filter((h) => h !== main);
+
+      if (main.id !== activeId) setSource(main.id);
+      if (mode === 'subtract') {
+        if (main.id === activeId) store.removeIds(main.groups.flatMap((g) => g.ids));
+      } else setSelection(main.groups, mode === 'add' ? 'add' : 'replace');
+
+      // Demais camadas: "replace" parte do zero; add/subtract mexem na marcação existente.
+      const next: Record<string, Record<string, SelectedGroup>> =
+        mode === 'replace' ? {} : { ...store.otherSelection };
+      for (const h of mode === 'subtract' && main.id !== activeId ? hits : others) {
+        let layer = { ...next[h.id] };
+        for (const g of h.groups) layer = applyGroup(layer, g, mode);
+        if (Object.keys(layer).length) next[h.id] = layer;
+        else delete next[h.id];
+      }
+      setOtherSelection(next);
+
+      const total = hits.reduce((n, h) => n + h.count, 0);
+      if (hits.some((h) => h.truncated)) toast.info('Seleção limitada a 200.000 registros.');
+      else if (mode === 'subtract') toast.success(`${fmtInt(total)} registro(s) na região retirado(s).`);
+      else toast.success(`${fmtInt(total)} registro(s) selecionado(s).`);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onPolygon = useCallback(
     async (polygon: LatLng[], mode: SelectionMode) => {
-      if (!sourceId) return;
+      const target = useAppStore.getState().clickTarget;
+      if (target !== 'active') {
+        await onPolygonMulti(polygon, mode, target);
+        return;
+      }
+      if (!sourceId) {
+        toast.info('Selecione uma camada ativa ou use "Clique: camada de cima / todas as camadas".');
+        return;
+      }
       setBusy(true);
       try {
         const res = await pointsService.selection(
@@ -588,7 +682,7 @@ export default function MapView() {
         setBusy(false);
       }
     },
-    [sourceId, active?.selectionFilters, setSelection],
+    [sourceId, active?.selectionFilters, setSelection, onPolygonMulti],
   );
 
   const onMapClick = useCallback(

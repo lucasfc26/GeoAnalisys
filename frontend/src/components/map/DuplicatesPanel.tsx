@@ -21,6 +21,8 @@ import { fmtInt } from '@/utils/format';
 import { PX_PER_CM } from '@/utils/geo';
 import { Button } from '../ui/Button';
 import { FloatingPanel } from '../ui/FloatingPanel';
+import { KeepZoomToggle } from './KeepZoomToggle';
+
 import { PreviewFrame } from './PreviewFrame';
 import { PreviewSettings } from './PreviewSettings';
 import { findElementById } from '@/lib/detachedWindows';
@@ -175,6 +177,7 @@ function Panel({
         resizable={{ minWidth: 10 * PX_PER_CM, minHeight: 5 * PX_PER_CM }}
         actions={
           <>
+            <KeepZoomToggle />
             <button
               type="button"
               onClick={() => setPhotos((v) => !v)}

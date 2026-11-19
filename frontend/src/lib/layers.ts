@@ -1,4 +1,11 @@
-import type { CategoryStyle, DataSource, FilterDef, LabelStyle, LayerStyle } from '@/types';
+import type {
+  CategoryStyle,
+  DataSource,
+  FilterDef,
+  LabelStyle,
+  LabelTemplate,
+  LayerStyle,
+} from '@/types';
 import { categoryColor } from '@/utils/format';
 
 /** Chave usada para o valor NULL nas categorias. */
@@ -117,6 +124,21 @@ export function addLabelTemplate(l: LayerStyle, name: string): LayerStyle {
   const s = syncLabelTemplate(l);
   const t = { id: newTemplateId(), name: name.trim() || 'Template', label: { ...s.label } };
   return { ...s, labelTemplates: [...(s.labelTemplates ?? []), t], activeLabelTemplate: t.id };
+}
+
+/**
+ * Copia para esta camada um template de outra e o ativa. Se já houver aqui um template de mesmo
+ * nome, ele é sobrescrito pelo copiado em vez de duplicado.
+ */
+export function importLabelTemplate(l: LayerStyle, t: LabelTemplate): LayerStyle {
+  const s = syncLabelTemplate(l);
+  const same = (s.labelTemplates ?? []).find((x) => x.name === t.name);
+  const id = same?.id ?? newTemplateId();
+  const copy = { id, name: t.name, label: { ...t.label } };
+  const list = same
+    ? (s.labelTemplates ?? []).map((x) => (x.id === id ? copy : x))
+    : [...(s.labelTemplates ?? []), copy];
+  return { ...s, labelTemplates: list, label: { ...copy.label }, activeLabelTemplate: id };
 }
 
 export function renameLabelTemplate(l: LayerStyle, id: string, name: string): LayerStyle {

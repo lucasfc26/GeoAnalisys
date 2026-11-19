@@ -24,10 +24,12 @@ import {
 import { boundaryStore } from '@/lib/boundaries';
 import { dropZone } from '@/lib/layerTree';
 import { DragGrip, DropMark } from '../layers/LayerControls';
+import { useWindowFrame } from '@/hooks/useWindowFrame';
 import { useMap } from '@/lib/mapContext';
 import { useAppStore } from '@/stores/appStore';
 import { Button } from '../ui/Button';
 import { Menu, type MenuEntry } from '../ui/Menu';
+import { PanelLockButton, usePanelLock } from './PanelLock';
 import { BasemapAboutDialog, BasemapLinkDialog, BasemapRemoveDialog } from './BasemapDialogs';
 
 const BASE = 'basemap';
@@ -434,6 +436,9 @@ export function BasemapControl({ hidden = false }: { hidden?: boolean }) {
   const [adding, setAdding] = useState(false);
   const def = useMemo(() => resolveBasemap(basemap, custom), [basemap, custom]);
   const applied = useRef<{ map: MlMap; key: string } | null>(null);
+  // Cadeado: destravado, o seletor pode ser arrastado pela moldura (fora dos botões).
+  const lock = usePanelLock('basemap');
+  const frame = useWindowFrame({ enabled: !lock.locked, resizable: false, initialZ: 10 });
 
   useEffect(() => {
     if (!map) return;
@@ -448,7 +453,20 @@ export function BasemapControl({ hidden = false }: { hidden?: boolean }) {
   if (hidden) return null;
   return (
     <>
-      <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 rounded-md bg-white px-2 py-1 text-xs text-slate-700 shadow-md">
+      <div
+        ref={frame.ref}
+        {...frame.frameProps}
+        onPointerDown={frame.dragProps.onPointerDown}
+        onDoubleClick={frame.dragProps.onDoubleClick}
+        style={{ zIndex: frame.z, ...frame.frameStyle }}
+        title={frame.dragProps.title}
+        className={clsx(
+          'absolute top-3 right-3 flex items-center gap-1.5 rounded-md bg-white px-2 py-1 text-xs text-slate-700 shadow-md',
+          frame.dragProps.className,
+          lock.locked && 'cursor-auto',
+        )}
+      >
+        <PanelLockButton locked={lock.locked} onToggle={lock.toggle} />
         <MapIcon className="size-4 text-accent-600" />
         <BasemapPicker
           current={def.id}

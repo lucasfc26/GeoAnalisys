@@ -105,7 +105,7 @@ function MenuList({
       <div
         ref={ref}
         role="menu"
-        className="scroll-thin fixed z-[60] max-h-[70vh] min-w-44 max-w-72 overflow-y-auto rounded-md border border-slate-200 bg-white py-1 text-xs text-slate-700 shadow-xl"
+        className="scroll-thin fixed z-[100000] max-h-[70vh] min-w-44 max-w-72 overflow-y-auto rounded-md border border-slate-200 bg-white py-1 text-xs text-slate-700 shadow-xl"
         style={{ left: pos.left, top: pos.top, visibility: pos.ready ? 'visible' : 'hidden' }}
       >
         {items.map((it, i) =>

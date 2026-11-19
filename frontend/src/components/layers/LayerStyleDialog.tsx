@@ -13,6 +13,7 @@ import {
   catKey,
   categoryStyle,
   defaultLabelExpr,
+  importLabelTemplate,
   labelBufferColor,
   labelBufferWidth,
   labelFontStack,
@@ -347,6 +348,28 @@ function LabelTemplates({
 }) {
   const templates = draft.labelTemplates ?? [];
   const active = templates.find((t) => t.id === draft.activeLabelTemplate) ?? null;
+  // Templates salvos nas outras camadas (de mesmo nome que um daqui, só o daqui aparece).
+  const allLayers = useAppStore((s) => s.layers);
+  const external = useMemo(() => {
+    const seen = new Set(templates.map((t) => t.name));
+    const out: { key: string; layerId: string; name: string }[] = [];
+    for (const l of allLayers) {
+      if (l.sourceId === draft.sourceId) continue;
+      for (const t of l.labelTemplates ?? []) {
+        if (seen.has(t.name)) continue;
+        seen.add(t.name);
+        out.push({ key: `${l.sourceId}\u0000${t.id}`, layerId: l.sourceId, name: t.name, });
+      }
+    }
+    return out;
+  }, [allLayers, templates, draft.sourceId]);
+  const importExternal = (key: string) => {
+    const [layerId, tid] = key.split('\u0000');
+    const t = allLayers
+      .find((l) => l.sourceId === layerId)
+      ?.labelTemplates?.find((x) => x.id === tid);
+    if (t) update((d) => importLabelTemplate(d, t));
+  };
   // Nome sendo digitado: novo template ou renomear o ativo.
   const [editing, setEditing] = useState<{ mode: 'new' | 'rename'; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -360,7 +383,7 @@ function LabelTemplates({
 
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 p-2.5">
-      <Label hint="versões salvas dos rótulos desta camada">Template</Label>
+      <Label hint="versões salvas dos rótulos (também as de outras camadas)">Template</Label>
       {editing ? (
         <div className="flex gap-2">
           <Input
@@ -387,14 +410,18 @@ function LabelTemplates({
             value={active?.id ?? ''}
             onChange={(e) => {
               setConfirmDelete(false);
-              if (e.target.value) update((d) => switchLabelTemplate(d, e.target.value));
+              const v = e.target.value;
+              if (v.includes('\u0000')) importExternal(v);
+              else if (v) update((d) => switchLabelTemplate(d, v));
             }}
             className="min-w-40 flex-1"
             aria-label="Template de rótulo"
           >
             {!active && (
               <option value="">
-                {templates.length ? '(rótulo atual, sem template)' : '(nenhum template salvo)'}
+                {templates.length || external.length
+                  ? '(rótulo atual, sem template)'
+                  : '(nenhum template salvo)'}
               </option>
             )}
             {templates.map((t) => (
@@ -402,6 +429,15 @@ function LabelTemplates({
                 {t.name}
               </option>
             ))}
+            {external.length > 0 && (
+              <optgroup label="De outras camadas">
+                {external.map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </Select>
           <Button
             size="sm"

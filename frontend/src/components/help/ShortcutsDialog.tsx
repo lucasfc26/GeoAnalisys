@@ -160,7 +160,9 @@ export default function ShortcutsDialog() {
                         <span className="text-xs text-slate-400 italic">sem tecla</span>
                       )}
                       {key !== d.key && !capturing && (
-                        <span className="ml-2 text-xs text-slate-400">padrão: {d.key}</span>
+                        <span className="ml-2 text-xs text-slate-400">
+                          padrão: {d.key || 'sem tecla'}
+                        </span>
                       )}
                     </td>
                     <td className="py-1.5">
@@ -179,7 +181,7 @@ export default function ShortcutsDialog() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          title={`Restaurar padrão (${d.key}, ativo)`}
+                          title={`Restaurar padrão (${d.key || 'sem tecla'}, ativo)`}
                           aria-label={`Restaurar padrão: ${d.label}`}
                           disabled={!changed}
                           className={changed ? '' : 'invisible'}

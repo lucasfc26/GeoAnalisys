@@ -73,6 +73,25 @@ export default function ExportDialog() {
     enabled: open && !!sourceId,
   });
   const template: ExportTemplate | undefined = templates.data?.find((t) => t.id === templateId);
+  // Modelos valem para todas as camadas: os desta primeiro; os das outras (um por nome) em seguida.
+  const { own, others } = useMemo(() => {
+    const own = (templates.data ?? []).filter((t) => t.sourceId === sourceId);
+    const names = new Set(own.map((t) => t.name));
+    const others: ExportTemplate[] = [];
+    for (const t of templates.data ?? []) {
+      if (t.sourceId === sourceId || names.has(t.name)) continue;
+      names.add(t.name);
+      others.push(t);
+    }
+    return { own, others };
+  }, [templates.data, sourceId]);
+  /** Modelo de outra camada: só leitura aqui (grava-se uma versão desta camada com "Salvar como novo") */
+  const shared = !!template && template.sourceId !== sourceId;
+  /** Colunas do modelo que esta camada não tem — precisam ser ajustadas (alerta vermelho) */
+  const missing = useMemo(
+    () => (template ? [...new Set(template.columns)].filter((k) => !colByKey.has(k)) : []),
+    [template, colByKey],
+  );
 
   useEffect(() => {
     if (open) setScope(ids.length ? 'selected' : filters.length ? 'filtered' : 'all');
@@ -302,7 +321,7 @@ export default function ExportDialog() {
         </div>
 
         <div className="min-w-0 space-y-2">
-          <Label htmlFor="exp-template" hint="salvo no banco, por tabela">
+          <Label htmlFor="exp-template" hint="salvo no banco, vale para todas as camadas">
             Modelo de colunas
           </Label>
           <div className="flex flex-wrap items-center gap-2">
@@ -314,13 +333,23 @@ export default function ExportDialog() {
               disabled={!templates.data}
             >
               <option value="">Padrão — todas as colunas</option>
-              {templates.data?.map((t) => (
+              {own.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
                 </option>
               ))}
+              {others.length > 0 && (
+                <optgroup label="De outras camadas">
+                  {others.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                      {t.sourceName ? ` — ${t.sourceName}` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </Select>
-            {template && (
+            {template && !shared && (
               <Button
                 size="sm"
                 icon={<Save className="size-3.5" />}
@@ -340,6 +369,7 @@ export default function ExportDialog() {
               Salvar como novo…
             </Button>
             {template &&
+              !shared &&
               (confirmDelete ? (
                 <Button
                   size="sm"
@@ -361,6 +391,20 @@ export default function ExportDialog() {
                 />
               ))}
           </div>
+          {missing.length > 0 && (
+            <p
+              role="alert"
+              className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700"
+            >
+              <b>
+                {missing.length === 1
+                  ? '1 coluna do modelo não existe nesta camada'
+                  : `${missing.length} colunas do modelo não existem nesta camada`}
+              </b>{' '}
+              e ficou de fora do arquivo: {missing.join(', ')}. Ajuste as colunas abaixo
+              {shared ? ' e use "Salvar como novo…" para guardar a versão desta camada' : ''}.
+            </p>
+          )}
           {newName !== null && (
             <form
               className="flex items-center gap-2"

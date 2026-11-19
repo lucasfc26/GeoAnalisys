@@ -27,6 +27,8 @@ import { parseList } from '@/utils/list';
 import { fromInputValue, toInputValue } from '../forms/ValueInput';
 import { Button } from '../ui/Button';
 import { FloatingPanel } from '../ui/FloatingPanel';
+import { KeepZoomToggle } from './KeepZoomToggle';
+
 import { toast } from '../ui/Toaster';
 import { metersPerCm, zoomOfScale } from './pointsOverlay';
 import { PreviewFrame } from './PreviewFrame';
@@ -397,7 +399,7 @@ export function ListModePanel({
           })
           .catch((err) => toast.error(errorMessage(err)));
       }
-      focusMap(focus);
+      focusMap({ ...focus, fromTool: true });
     },
     [scale, steps, sameCoord, fitAll, sourceId, setSource, setSelection, focusMap],
   );
@@ -417,7 +419,7 @@ export function ListModePanel({
       if (useAppStore.getState().sourceId !== sourceId) setSource(sourceId);
       setSelection(groups, 'replace');
       const b = boundsOfPoints(groups);
-      if (b) focusMap({ bounds: b });
+      if (b) focusMap({ bounds: b, fromTool: true });
     },
     [allGroups, sourceId, setSource, setSelection, focusMap],
   );
@@ -631,6 +633,7 @@ export function ListModePanel({
         actions={
           results && (
             <>
+              <KeepZoomToggle />
               {!collapsed && (
                 <button
                   type="button"

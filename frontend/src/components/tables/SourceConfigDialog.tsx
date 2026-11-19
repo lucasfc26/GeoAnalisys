@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { AlertTriangle, CheckCircle2, Database, Gauge, Pencil, Plus, Trash2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Database, FileUp, Gauge, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { queryKeys, useCrsList, useSources } from '@/hooks/useSourceData';
 import { errorMessage } from '@/lib/api';
@@ -14,6 +14,7 @@ import { Dialog } from '../ui/Dialog';
 import { Input, Label, Select } from '../ui/Field';
 import { Badge, ErrorState, Skeleton } from '../ui/States';
 import { toast } from '../ui/Toaster';
+import { AppendSourceDialog } from './AppendSourceDialog';
 
 const EMPTY: SourceConfig = {
   name: '',
@@ -158,6 +159,7 @@ function SourceForm({ editing, onDone }: { editing: DataSource | null; onDone: (
   );
   const [test, setTest] = useState<SourceTestResult | null>(null);
   const [crsSearch, setCrsSearch] = useState('');
+  const [appendOpen, setAppendOpen] = useState(false);
   const set = (patch: Partial<SourceConfig>) => {
     setCfg((c) => ({ ...c, ...patch }));
     setTest(null);
@@ -213,6 +215,8 @@ function SourceForm({ editing, onDone }: { editing: DataSource | null; onDone: (
     mutationFn: () => (editing ? sourcesService.update(editing.id, cfg) : sourcesService.create(cfg)),
     onSuccess: async (saved) => {
       await qc.invalidateQueries({ queryKey: queryKeys.sources });
+      // O nome da fonte aparece na Tabela de Alterações (o backend o atualiza ao renomear).
+      qc.invalidateQueries({ queryKey: ['changes'] });
       qc.invalidateQueries({ queryKey: queryKeys.schema(saved.id) });
       qc.invalidateQueries({ queryKey: queryKeys.points(saved.id) });
       setSource(saved.id);
@@ -405,15 +409,27 @@ function SourceForm({ editing, onDone }: { editing: DataSource | null; onDone: (
         </>
       )}
 
-      <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4">
-        <Button onClick={onDone}>Cancelar</Button>
-        <Button onClick={() => runTest.mutate()} loading={runTest.isPending} disabled={!complete}>
-          Testar
-        </Button>
-        <Button variant="primary" onClick={() => save.mutate()} loading={save.isPending} disabled={!complete}>
-          {editing ? 'Salvar e recarregar mapa' : 'Salvar e carregar mapa'}
-        </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4">
+        <div>
+          {editing && (
+            <Button icon={<FileUp className="size-4" />} onClick={() => setAppendOpen(true)}>
+              Importar dados…
+            </Button>
+          )}
+        </div>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button onClick={onDone}>Cancelar</Button>
+          <Button onClick={() => runTest.mutate()} loading={runTest.isPending} disabled={!complete}>
+            Testar
+          </Button>
+          <Button variant="primary" onClick={() => save.mutate()} loading={save.isPending} disabled={!complete}>
+            {editing ? 'Salvar e recarregar mapa' : 'Salvar e carregar mapa'}
+          </Button>
+        </div>
       </div>
+      {appendOpen && editing && (
+        <AppendSourceDialog source={editing} onClose={() => setAppendOpen(false)} />
+      )}
     </div>
   );
 }

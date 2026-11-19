@@ -46,6 +46,7 @@ export function ValueInput({
   disabled,
   placeholder,
   list,
+  autoFocus,
 }: {
   col: ColumnMeta;
   value: string;
@@ -53,11 +54,18 @@ export function ValueInput({
   disabled?: boolean;
   placeholder?: string;
   list?: string;
+  autoFocus?: boolean;
 }) {
   const id = `f-${col.name}`;
   if (col.kind === 'boolean') {
     return (
-      <Select id={id} value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+      <Select
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        autoFocus={autoFocus}
+      >
         <option value="">—</option>
         <option value="true">Sim</option>
         <option value="false">Não</option>
@@ -71,6 +79,7 @@ export function ValueInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
+        autoFocus={autoFocus}
         rows={3}
         className="block w-full rounded-md border border-slate-300 px-2.5 py-1.5 font-mono text-xs focus:border-accent-500 focus:outline-none"
       />
@@ -85,6 +94,7 @@ export function ValueInput({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
+      autoFocus={autoFocus}
       placeholder={placeholder}
       list={list}
     />

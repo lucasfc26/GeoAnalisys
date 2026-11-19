@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { isTopWindowZ, nextWindowZ } from '@/hooks/useWindowFrame';
 import { useAppStore } from '@/stores/appStore';
 import { SkeletonList } from '../ui/States';
 
@@ -92,6 +93,11 @@ export function RightPanel() {
   const desktop = useDesktop();
   const floating = desktop && floatingPref;
   const [, rerender] = useState(0);
+  // Janela móvel: a clicada fica por cima das demais janelas.
+  const [z, setZ] = useState(40);
+  const raise = () => {
+    if (!isTopWindowZ(z)) setZ(nextWindowZ());
+  };
 
   // Mantém a janela móvel dentro da tela quando o navegador muda de tamanho.
   useEffect(() => {
@@ -166,7 +172,7 @@ export function RightPanel() {
 
   const dockedOverlay = desktop && !floating && !collapsed && height !== null;
   const style: CSSProperties = floating
-    ? { left: box!.x, top: box!.y, width: box!.w, height: box!.h }
+    ? { left: box!.x, top: box!.y, width: box!.w, height: box!.h, zIndex: z }
     : ({
         '--panel-w': `${Math.min(width, maxWidth())}px`,
         ...(dockedOverlay && { height }),
@@ -183,6 +189,7 @@ export function RightPanel() {
       )}
       <aside
         style={style}
+        onPointerDownCapture={floating ? raise : undefined}
         className={clsx(
           'flex flex-col bg-slate-50',
           floating

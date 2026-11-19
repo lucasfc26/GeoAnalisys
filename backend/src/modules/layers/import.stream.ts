@@ -37,16 +37,41 @@ export class ImportFileError extends Error {}
 
 const CHUNK = 1 << 20;
 
-/** Abre o arquivo pelo formato (extensão do nome original). */
+/** Codificações aceitas para CSV/TXT (além da detecção automática). */
+const TEXT_ENCODINGS = new Set(['utf-8', 'iso-8859-1', 'iso-8859-15', 'windows-1252', 'utf-16le']);
+
+/**
+ * Nome de codificação para o TextDecoder, ou null = detectar (UTF-8 ou Windows-1252).
+ * Aceita apelidos: utf8, latin1, ansi, iso.
+ */
+export function normalizeTextEncoding(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const v = value.trim().toLowerCase().replace(/_/g, '-');
+  if (!v || v === 'auto') return null;
+  if (v === 'utf8' || v === 'utf-8') return 'utf-8';
+  if (v === 'latin1' || v === 'latin-1' || v === 'iso' || v === 'iso8859-1' || v === 'iso-8859-1')
+    return 'iso-8859-1';
+  if (v === 'iso8859-15' || v === 'iso-8859-15') return 'iso-8859-15';
+  if (v === 'windows-1252' || v === 'cp1252' || v === 'ansi') return 'windows-1252';
+  if (v === 'utf16' || v === 'utf-16' || v === 'utf16le' || v === 'utf-16le') return 'utf-16le';
+  if (TEXT_ENCODINGS.has(v)) return v;
+  throw new ImportFileError(
+    `Codificação não suportada: ${value}. Use UTF-8, ISO-8859-1, Windows-1252, ISO-8859-15 ou UTF-16 LE.`,
+  );
+}
+
+/** Abre o arquivo pelo formato (extensão do nome original). `encoding` só vale para CSV/TXT. */
 export async function openRows(
   path: string,
   originalName: string,
   sheet?: string | null,
+  encoding?: string | null,
 ): Promise<RowSource> {
   const ext = extname(originalName || '').toLowerCase();
   if (ext === '.geojson' || ext === '.json') return openGeoJson(path);
   if (ext === '.xlsx' || ext === '.xlsm') return openXlsx(path, sheet ?? null);
-  if (ext === '.csv' || ext === '.txt' || ext === '.tsv') return openCsv(path);
+  if (ext === '.csv' || ext === '.txt' || ext === '.tsv')
+    return openCsv(path, normalizeTextEncoding(encoding));
   if (ext === '.xls') {
     throw new ImportFileError('Arquivos .xls antigos não são suportados: salve como .xlsx ou .csv');
   }
@@ -64,25 +89,34 @@ function counted(path: string) {
   return { stream, progress: () => Math.min(read / size, 1) };
 }
 
-function openCsv(path: string): RowSource {
+function openCsv(path: string, encoding: string | null): RowSource {
   const { stream, progress } = counted(path);
   async function* rows(): AsyncGenerator<Cell[]> {
     let decoder: TextDecoder | null = null;
+    let latin1 = false;
     let parser: CsvParser | null = null;
     const out: string[][] = [];
     for await (const chunk of stream as AsyncIterable<Buffer>) {
       let text: string;
-      if (!decoder) {
-        decoder = new TextDecoder(sniffEncoding(chunk));
-        text = decoder.decode(chunk, { stream: true }).replace(/^﻿/, '');
+      if (!decoder && !latin1) {
+        const enc = encoding ?? sniffEncoding(chunk);
+        // O TextDecoder trata "iso-8859-1" como Windows-1252. Latin-1 de verdade é byte = caractere.
+        if (enc === 'iso-8859-1') {
+          latin1 = true;
+          text = chunk.toString('latin1').replace(/^\uFEFF/, '');
+        } else {
+          decoder = new TextDecoder(enc);
+          text = decoder.decode(chunk, { stream: true }).replace(/^\uFEFF/, '');
+        }
         parser = new CsvParser(detectDelimiter(text));
-      } else text = decoder.decode(chunk, { stream: true });
+      } else if (latin1) text = chunk.toString('latin1');
+      else text = decoder!.decode(chunk, { stream: true });
       parser!.push(text, out);
       for (const r of out) if (hasValue(r)) yield r;
       out.length = 0;
     }
-    if (!parser || !decoder) return;
-    parser.push(decoder.decode(), out);
+    if (!parser || (!decoder && !latin1)) return;
+    if (decoder) parser.push(decoder.decode(), out);
     parser.end(out);
     for (const r of out) if (hasValue(r)) yield r;
   }

@@ -25,6 +25,8 @@ export const LNG_KEY = '@lng';
 export interface ExportTemplate {
   id: string;
   sourceId: string;
+  /** Camada em que o modelo foi salvo (os modelos valem para todas as camadas) */
+  sourceName?: string;
   name: string;
   columns: string[];
   /** Nome alternativo no cabeçalho, por coluna */

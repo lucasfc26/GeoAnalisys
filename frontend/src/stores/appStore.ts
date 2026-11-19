@@ -90,6 +90,8 @@ export interface MapFocus {
   zoom?: number;
   /** Pisca o centro ao chegar (ex.: coordenada digitada na busca) */
   flash?: boolean;
+  /** Pedido de uma ferramenta de lista/busca: com "manter o zoom" ligado, só centraliza */
+  fromTool?: boolean;
   nonce: number;
 }
 
@@ -121,6 +123,10 @@ interface AppState {
   otherSelection: Record<string, Record<string, SelectedGroup>>;
   /** O que o clique num ponto seleciona (preferência da máquina) */
   clickTarget: ClickTarget;
+  /** Ferramentas de lista/busca só centralizam no ponto, mantendo o zoom atual do mapa */
+  keepZoom: boolean;
+  /** Painéis do mapa com o cadeado aberto (podem ser movidos): 'layers' | 'basemap' (padrão: travados) */
+  unlockedPanels: string[];
   /** Coordenada em foco no painel (quando há várias selecionadas) */
   activeKey: string | null;
   /** Registro aberto no painel */
@@ -259,6 +265,8 @@ interface AppState {
   clearSelection: () => void;
   removeIds: (ids: string[]) => void;
   setClickTarget: (target: ClickTarget) => void;
+  setKeepZoom: (keep: boolean) => void;
+  setPanelUnlocked: (id: string, unlocked: boolean) => void;
   /** Substitui os pontos selecionados das outras camadas */
   setOtherSelection: (other: Record<string, Record<string, SelectedGroup>>) => void;
   /** Tira registros de outra camada da seleção */
@@ -369,6 +377,8 @@ export const useAppStore = create<AppState>()(
       selection: {},
       otherSelection: {},
       clickTarget: 'top',
+      keepZoom: false,
+      unlockedPanels: [],
       primaryIds: null,
       activeKey: null,
       activeRecordId: null,
@@ -674,6 +684,13 @@ export const useAppStore = create<AppState>()(
         }),
 
       setClickTarget: (clickTarget) => set({ clickTarget }),
+      setKeepZoom: (keepZoom) => set({ keepZoom }),
+      setPanelUnlocked: (id, unlocked) =>
+        set((s) => ({
+          unlockedPanels: unlocked
+            ? [...new Set([...s.unlockedPanels, id])]
+            : s.unlockedPanels.filter((p) => p !== id),
+        })),
       setOtherSelection: (otherSelection) => set({ otherSelection }),
       removeOtherIds: (layerId, ids) =>
         set((s) => {
@@ -786,6 +803,8 @@ export const useAppStore = create<AppState>()(
       partialize: (s) => ({
         sourceId: s.sourceId,
         clickTarget: s.clickTarget,
+        keepZoom: s.keepZoom,
+        unlockedPanels: s.unlockedPanels,
         tool: s.tool,
         lastSelectTool: s.lastSelectTool,
         filters: s.filters,

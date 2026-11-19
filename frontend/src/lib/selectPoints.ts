@@ -29,7 +29,7 @@ export function selectPoints(sourceId: string, points: ToolPoint[], bounds?: Bou
   }
   useAppStore.getState().setSelection([...groups.values()]);
   const b = bounds ?? boundsOfPoints(points);
-  if (b) s.focusMap({ bounds: b });
+  if (b) s.focusMap({ bounds: b, fromTool: true });
 }
 
 /** CSV (;) com BOM, para abrir direto no Excel. */

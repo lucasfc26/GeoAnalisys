@@ -39,7 +39,10 @@ import {
 } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { LayerRuntime } from '@/hooks/useLayers';
+import { RENAME_LAYER_EVENT } from '@/hooks/useShortcuts';
+import { PanelLockButton, usePanelLock } from '../map/PanelLock';
 import { queryKeys, useSources } from '@/hooks/useSourceData';
+import { useWindowFrame } from '@/hooks/useWindowFrame';
 import { errorMessage } from '@/lib/api';
 import { catKey, categoryStyle, layerName, switchLabelTemplate } from '@/lib/layers';
 import {
@@ -665,6 +668,18 @@ export function LayersPanel({ runtimes }: { runtimes: LayerRuntime[] }) {
   const [drag, setDrag] = useState<TreeRef | null>(null);
   const [over, setOver] = useState<{ ref: TreeRef; where: DropWhere } | null>(null);
 
+  // F2 (atalho "Renomear"): abre o painel e põe o nome da camada ativa em edição.
+  useEffect(() => {
+    const on = () => {
+      const id = useAppStore.getState().sourceId;
+      if (!id || !useAppStore.getState().layers.some((l) => l.sourceId === id)) return;
+      setOpen(true);
+      setRenaming({ kind: 'layer', id });
+    };
+    window.addEventListener(RENAME_LAYER_EVENT, on);
+    return () => window.removeEventListener(RENAME_LAYER_EVENT, on);
+  }, []);
+
   // Remove do mapa as camadas cuja configuração de fonte foi excluída.
   useEffect(() => {
     if (!sources.data) return;
@@ -790,11 +805,20 @@ export function LayersPanel({ runtimes }: { runtimes: LayerRuntime[] }) {
     },
   ];
 
+  // Painel livre: arrasta pelo cabeçalho, redimensiona pelas bordas e vem à frente ao clicar.
+  const lock = usePanelLock('layers');
+  const frame = useWindowFrame({ minWidth: 220, minHeight: 120, initialZ: 10, enabled: !lock.locked });
+
   if (!open) {
     return (
       <button
         type="button"
         onClick={() => setOpen(true)}
+        style={
+          frame.rect
+            ? { position: 'fixed', left: frame.rect.x, top: frame.rect.y, right: 'auto' }
+            : undefined
+        }
         className="absolute top-3 left-3 z-10 flex items-center gap-1.5 rounded-md bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 shadow-md hover:bg-slate-50"
       >
         <Layers className="size-4 text-accent-600" /> Camadas ({layers.length})
@@ -803,10 +827,24 @@ export function LayersPanel({ runtimes }: { runtimes: LayerRuntime[] }) {
   }
 
   return (
-    <div className="absolute top-3 left-3 z-10 flex max-h-[calc(100%-7rem)] w-72 max-w-[calc(100%-1.5rem)] flex-col rounded-lg border border-slate-200 bg-white/97 shadow-lg">
-      <div className="flex items-center gap-2 border-b border-slate-200 px-2.5 py-1.5">
+    <div
+      ref={frame.ref}
+      {...frame.frameProps}
+      style={{ zIndex: frame.z, ...frame.frameStyle }}
+      className="absolute top-3 left-3 flex max-h-[calc(100%-7rem)] w-72 max-w-[calc(100%-1.5rem)] flex-col rounded-lg border border-slate-200 bg-white/97 shadow-lg"
+    >
+      <div
+        onPointerDown={frame.dragProps.onPointerDown}
+        onDoubleClick={frame.dragProps.onDoubleClick}
+        title={frame.dragProps.title}
+        className={clsx(
+          'flex items-center gap-2 border-b border-slate-200 px-2.5 py-1.5',
+          frame.dragProps.className,
+        )}
+      >
         <Layers className="size-4 text-accent-600" />
         <span className="flex-1 text-xs font-semibold text-slate-800">Camadas</span>
+        <PanelLockButton locked={lock.locked} onToggle={lock.toggle} />
         <button
           type="button"
           onClick={(e) => {
@@ -828,7 +866,7 @@ export function LayersPanel({ runtimes }: { runtimes: LayerRuntime[] }) {
           <ChevronUp className="size-4" />
         </button>
       </div>
-      <div className="scroll-thin overflow-y-auto p-1.5">
+      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto p-1.5">
         {tree.length ? (
           <ul className="space-y-0.5">
             {tree.map((n) =>
@@ -872,6 +910,7 @@ export function LayersPanel({ runtimes }: { runtimes: LayerRuntime[] }) {
         <BoundariesSection openMenu={openMenu} />
       </div>
       {menu && <Menu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {frame.handles}
     </div>
   );
 }

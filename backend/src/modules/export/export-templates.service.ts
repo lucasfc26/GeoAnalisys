@@ -20,8 +20,18 @@ export class ExportTemplatesService {
     private readonly sources: SourcesService,
   ) {}
 
-  list(sourceId: string) {
-    return this.prisma.exportTemplate.findMany({ where: { sourceId }, orderBy: { name: 'asc' } });
+  /**
+   * Modelos de todas as camadas (compartilhados): os de `sourceId` primeiro. Cada um traz o nome da
+   * camada de origem; as colunas que a camada de destino não tem são sinalizadas pelo cliente.
+   */
+  async list(sourceId: string) {
+    const rows = await this.prisma.exportTemplate.findMany({
+      orderBy: { name: 'asc' },
+      include: { source: { select: { name: true } } },
+    });
+    return rows
+      .map(({ source, ...t }) => ({ ...t, sourceName: source.name }))
+      .sort((a, b) => Number(b.sourceId === sourceId) - Number(a.sourceId === sourceId));
   }
 
   async create(input: TemplateInput) {

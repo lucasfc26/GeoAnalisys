@@ -122,7 +122,7 @@ export function IconButton({
       {tip && !rest.disabled && (
         <span
           style={tip}
-          className="pointer-events-none tone-fixed fixed z-50 whitespace-nowrap rounded bg-slate-900 px-2 py-1 text-xs font-normal text-white shadow-lg"
+          className="pointer-events-none tone-fixed fixed z-[100000] whitespace-nowrap rounded bg-slate-900 px-2 py-1 text-xs font-normal text-white shadow-lg"
         >
           {label}
           {shortcut && (

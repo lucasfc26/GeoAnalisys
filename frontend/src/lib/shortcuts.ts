@@ -18,13 +18,28 @@ export type ShortcutId =
   | 'search'
   | 'center'
   | 'zoomIn'
-  | 'zoomOut';
+  | 'zoomOut'
+  | 'preview'
+  | 'changes'
+  | 'export'
+  | 'mapMaker'
+  | 'copyLayer'
+  | 'refresh'
+  | 'bulkEdit'
+  | 'filters'
+  | 'importLayer'
+  | 'associate'
+  | 'duplicates'
+  | 'outsideBoundary'
+  | 'attributeDistance'
+  | 'comparison'
+  | 'rename';
 
 export interface ShortcutDef {
   id: ShortcutId;
   group: string;
   label: string;
-  /** Tecla padrão */
+  /** Tecla padrão ('' = sem tecla: o usuário escolhe em Sobre › Atalhos) */
   key: string;
 }
 
@@ -47,6 +62,21 @@ export const SHORTCUTS: ShortcutDef[] = [
   { id: 'edit', group: 'Seleção', label: 'Editar registro aberto', key: 'E' },
   { id: 'list', group: 'Janelas', label: 'Modo lista (percorrer valores)', key: 'L' },
   { id: 'search', group: 'Janelas', label: 'Selecionar por valor (atributos)', key: 'F3' },
+  { id: 'copyLayer', group: 'Seleção', label: 'Copiar selecionados para nova camada', key: '' },
+  { id: 'bulkEdit', group: 'Seleção', label: 'Editar selecionados em massa', key: '' },
+  { id: 'preview', group: 'Janelas', label: 'Preview do ponto selecionado (frame)', key: 'T' },
+  { id: 'changes', group: 'Janelas', label: 'Tabela de Alterações', key: 'H' },
+  { id: 'export', group: 'Janelas', label: 'Exportar', key: 'X' },
+  { id: 'mapMaker', group: 'Janelas', label: 'Criar mapa (Comitê / Status 18)', key: '' },
+  { id: 'filters', group: 'Janelas', label: 'Filtros da camada', key: 'F' },
+  { id: 'importLayer', group: 'Janelas', label: 'Importar CSV/XLSX/GeoJSON/KML', key: '' },
+  { id: 'associate', group: 'Ferramentas (menu)', label: 'Associar Camadas', key: '' },
+  { id: 'duplicates', group: 'Ferramentas (menu)', label: 'Duplicidades', key: '' },
+  { id: 'outsideBoundary', group: 'Ferramentas (menu)', label: 'Fora do limite', key: '' },
+  { id: 'attributeDistance', group: 'Ferramentas (menu)', label: 'Distância por atributo', key: '' },
+  { id: 'comparison', group: 'Ferramentas (menu)', label: 'Quadro Comparativo', key: '' },
+  { id: 'rename', group: 'Camadas', label: 'Renomear a camada ativa (nome de exibição)', key: 'F2' },
+  { id: 'refresh', group: 'Mapa', label: 'Atualizar dados', key: '' },
   { id: 'center', group: 'Mapa', label: 'Centralizar', key: 'C' },
   { id: 'zoomIn', group: 'Mapa', label: 'Aproximar', key: '+' },
   { id: 'zoomOut', group: 'Mapa', label: 'Afastar', key: '-' },
@@ -130,7 +160,8 @@ export const useShortcutStore = create<ShortcutState>()(
       disabled: [],
       setKey: (id, combo) => {
         const s = get();
-        const other = SHORTCUTS.find((d) => d.id !== id && keyOf(s, d.id) === combo)?.id ?? null;
+        const other =
+          SHORTCUTS.find((d) => d.id !== id && keyOf(s, d.id) === combo && combo !== '')?.id ?? null;
         const keys = { ...s.keys, [id]: combo };
         if (other) keys[other] = '';
         set({ keys });
@@ -145,7 +176,10 @@ export const useShortcutStore = create<ShortcutState>()(
           const keys = { ...s.keys };
           delete keys[id];
           // A tecla padrão sai de quem a pegou nesse meio-tempo.
-          const other = SHORTCUTS.find((d) => d.id !== id && keyOf(s, d.id) === defaultKey(id));
+          const dk = defaultKey(id);
+          const other = dk
+            ? SHORTCUTS.find((d) => d.id !== id && keyOf(s, d.id) === dk)
+            : undefined;
           if (other) keys[other.id] = '';
           return { keys, disabled: s.disabled.filter((d) => d !== id) };
         }),

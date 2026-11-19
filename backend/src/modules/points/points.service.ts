@@ -1898,10 +1898,18 @@ export class PointsService {
             (c) => !skip.has(c.name) && !c.isGenerated && !(c.readOnly && c.kind !== 'geometry'),
           );
           const target = [...cols.map((c) => qi(c.name)), qi(ctx.xCol.name), qi(ctx.yCol.name)];
-          const values = [...cols.map((c) => qi(c.name)), xCast, yCast];
+          // Sem deslocamento a cópia fica exatamente na mesma coordenada: copia X, Y e geometria
+          // como estão (passar por round() alteraria coordenadas com mais casas que o arredondamento
+          // e a cópia não ficaria agrupada com o original).
+          const inPlace = !dx && !dy;
+          const values = [
+            ...cols.map((c) => qi(c.name)),
+            inPlace ? qi(ctx.xCol.name) : xCast,
+            inPlace ? qi(ctx.yCol.name) : yCast,
+          ];
           if (geom) {
             target.push(qi(ctx.geomCol!.name));
-            values.push(geom);
+            values.push(inPlace ? qi(ctx.geomCol!.name) : geom);
           }
           const numericId =
             (ctx.idCol.kind === 'integer' || ctx.idCol.kind === 'number') && !ctx.idCol.isGenerated;

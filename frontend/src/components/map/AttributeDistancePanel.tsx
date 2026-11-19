@@ -22,6 +22,8 @@ import { PX_PER_CM, boundsOfPoints, fmtDistance } from '@/utils/geo';
 import { ValueInput, fromInputValue, toInputValue } from '../forms/ValueInput';
 import { Button } from '../ui/Button';
 import { FloatingPanel } from '../ui/FloatingPanel';
+import { KeepZoomToggle } from './KeepZoomToggle';
+
 import { Select } from '../ui/Field';
 import { toast } from '../ui/Toaster';
 
@@ -197,6 +199,7 @@ function Panel() {
       resizable={{ minWidth: 10 * PX_PER_CM, minHeight: 5 * PX_PER_CM }}
       actions={
         <>
+          <KeepZoomToggle />
           <button
             type="button"
             onClick={() => setPickCols((v) => !v)}

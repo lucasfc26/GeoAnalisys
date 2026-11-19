@@ -69,7 +69,30 @@ export interface ImportResult {
   invalid: Record<string, number>;
 }
 
-/** Andamento de uma importação em segundo plano. */
+export interface AppendResult {
+  rows: number;
+  truncated: boolean;
+  invalid: Record<string, number>;
+}
+
+export interface AppendJob {
+  id: string;
+  phase: 'reading' | 'done' | 'error' | 'cancelled';
+  rows: number;
+  percent: number;
+  result?: AppendResult;
+  error?: string;
+}
+
+export interface AppendRequest {
+  uploadId: string;
+  sheet: string | null;
+  encoding: string | null;
+  truncate: boolean;
+  /** Coluna da tabela → coluna do arquivo */
+  mapping: Record<string, string>;
+}
+
 export interface ImportJob {
   id: string;
   /** reading = lendo e gravando; indexing = criando índices e registrando a camada */
@@ -86,7 +109,11 @@ export interface ImportJob {
  * Envia o arquivo (com o progresso do envio, que o fetch não dá) e recebe a prévia. Sem limite de
  * tempo: arquivos de centenas de MB levam um tempo para subir.
  */
-function uploadForPreview(file: File, onProgress: (fraction: number) => void) {
+function uploadForPreview(
+  file: File,
+  onProgress: (fraction: number) => void,
+  encoding?: string | null,
+) {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<ImportPreview>((resolve, reject) => {
     xhr.open('POST', `${API_BASE}/layers/import/preview`);
@@ -114,6 +141,7 @@ function uploadForPreview(file: File, onProgress: (fraction: number) => void) {
     xhr.onabort = () => reject(new ApiError('Envio cancelado.', 0, 'ABORTED'));
     const fd = new FormData();
     fd.append('file', file);
+    if (encoding) fd.append('encoding', encoding);
     xhr.send(fd);
   });
   return { promise, abort: () => xhr.abort() };
@@ -124,9 +152,13 @@ export const layersService = {
   /** Envia o arquivo e lê só o começo (abas, colunas, tipos, primeiras linhas). */
   upload: uploadForPreview,
 
-  /** Prévia de um arquivo já enviado (ex.: outra aba), sem reenviar. */
-  preview: (uploadId: string, sheet?: string | null) =>
-    api.post<ImportPreview>('/layers/import/preview', { uploadId, sheet: sheet ?? undefined }),
+  /** Prévia de um arquivo já enviado (outra aba ou outra codificação), sem reenviar. */
+  preview: (uploadId: string, sheet?: string | null, encoding?: string | null) =>
+    api.post<ImportPreview>('/layers/import/preview', {
+      uploadId,
+      sheet: sheet ?? undefined,
+      encoding: encoding ?? undefined,
+    }),
 
   /** Começa a importação em segundo plano; acompanhe com `importStatus`. */
   startImport: (uploadId: string, config: ImportConfig) =>
@@ -136,6 +168,15 @@ export const layersService = {
 
   cancelImport: (jobId: string) =>
     api.delete<{ cancelled: boolean }>(`/layers/import/jobs/${jobId}`),
+
+  /** Grava o arquivo já enviado na tabela da fonte (acrescenta ou trunca). */
+  startAppend: (sourceId: string, body: AppendRequest) =>
+    api.post<{ jobId: string }>(`/layers/${encodeURIComponent(sourceId)}/append`, body),
+
+  appendStatus: (jobId: string) => api.get<AppendJob>(`/layers/append/jobs/${jobId}`),
+
+  cancelAppend: (jobId: string) =>
+    api.delete<{ cancelled: boolean }>(`/layers/append/jobs/${jobId}`),
 
   copy: (sourceId: string, ids: string[], name: string, schema?: string) =>
     request<{ source: DataSource; rows: number; tableName: string }>('/layers/copy', {

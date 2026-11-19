@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DataSource } from '@prisma/client';
 import { createHash } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -63,7 +68,23 @@ export class SourcesService {
     return s;
   }
 
+  /** Nome da fonte (camada) é único: sem diferenciar maiúsculas/minúsculas nem espaços nas pontas. */
+  private async assertNameFree(name: string, exceptId?: string) {
+    const wanted = name.trim().toLowerCase();
+    const others = await this.prisma.dataSource.findMany({
+      where: exceptId ? { id: { not: exceptId } } : undefined,
+      select: { name: true },
+    });
+    const clash = others.find((o) => o.name.trim().toLowerCase() === wanted);
+    if (clash) {
+      throw new ConflictException(
+        `Já existe uma camada com o nome "${clash.name}". Escolha outro nome para a fonte.`,
+      );
+    }
+  }
+
   async create(dto: SourceConfigDto, userId: string) {
+    await this.assertNameFree(dto.name);
     await this.buildContext(this.toSourceShape(dto));
     const info = await this.catalog.info();
     const created = await this.prisma.dataSource.create({
@@ -94,10 +115,21 @@ export class SourcesService {
 
   async update(id: string, dto: UpdateSourceDto, userId: string) {
     const current = await this.get(id);
+    const renamed = dto.name !== undefined && dto.name !== current.name;
+    if (renamed) await this.assertNameFree(dto.name!, id);
     const merged = { ...current, ...this.clean(dto) };
     await this.buildContext(merged as DataSource);
     const updated = await this.prisma.dataSource.update({ where: { id }, data: this.clean(dto) });
     this.ctxCache.delete(id);
+    // Tabela de Alterações guarda o nome da fonte: os pontos dela passam a mostrar o nome novo.
+    if (renamed) {
+      // SQL direto: o updateMany do Prisma mexeria em updated_at e reordenaria a tabela.
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE gis_app.alteracoes SET source_name = $1 WHERE source_id = $2`,
+        updated.name,
+        id,
+      );
+    }
     await this.prisma.auditLog.create({
       data: {
         userId,

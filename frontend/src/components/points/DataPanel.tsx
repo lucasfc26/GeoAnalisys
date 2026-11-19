@@ -78,6 +78,7 @@ function GroupView({
   const items = useMemo(() => itemsFor([group], primaryIds), [group, primaryIds]);
   const index = activeRecordId ? group.ids.indexOf(activeRecordId) : -1;
   const multi = group.ids.length > 1;
+  const onlyGroup = useAppStore((s) => Object.keys(s.selection).length === 1);
 
   const go = (delta: number) => {
     const next = (index + delta + group.ids.length) % group.ids.length;
@@ -87,6 +88,8 @@ function GroupView({
   return (
     <div className="space-y-4">
       <CoordinateHeader group={group} crs={crs} />
+      {/* Os diálogos agem sobre a seleção inteira: só aqui se a coordenada é a única selecionada. */}
+      {multi && onlyGroup && <SelectionActions ids={group.ids} />}
       {multi && (
         <div>
           <div className="mb-2 flex items-center justify-between">
@@ -204,6 +207,44 @@ function OtherLayers() {
   );
 }
 
+/** Editar em massa, excluir, exportar e copiar os registros selecionados (`ids`). */
+function SelectionActions({ ids }: { ids: string[] }) {
+  const openDialog = useAppStore((s) => s.openDialog);
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <Button
+        size="sm"
+        icon={<PenSquare className="size-3.5" />}
+        onClick={() => openDialog('bulkEdit', true)}
+      >
+        Editar em massa
+      </Button>
+      <Button
+        size="sm"
+        className="text-red-600"
+        icon={<Trash2 className="size-3.5" />}
+        onClick={() => openDialog('confirmDelete', { ids })}
+      >
+        Excluir
+      </Button>
+      <Button
+        size="sm"
+        icon={<Download className="size-3.5" />}
+        onClick={() => openDialog('export', true)}
+      >
+        Exportar selecionados
+      </Button>
+      <Button
+        size="sm"
+        icon={<CopyPlus className="size-3.5" />}
+        onClick={() => openDialog('copyToLayer', true)}
+      >
+        Copiar para nova camada
+      </Button>
+    </div>
+  );
+}
+
 /** Vários pontos selecionados: resumo, ações em massa e lista. */
 function MultiView({
   sourceId,
@@ -221,7 +262,6 @@ function MultiView({
     () => itemsFor(Object.values(selection), primaryIds),
     [selection, primaryIds],
   );
-  const openDialog = useAppStore((s) => s.openDialog);
   const openRecord = useAppStore((s) => s.openRecord);
   const removeIds = useAppStore((s) => s.removeIds);
   const groupCount = Object.keys(selection).length;
@@ -255,37 +295,7 @@ function MultiView({
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <Button
-          size="sm"
-          icon={<PenSquare className="size-3.5" />}
-          onClick={() => openDialog('bulkEdit', true)}
-        >
-          Editar em massa
-        </Button>
-        <Button
-          size="sm"
-          className="text-red-600"
-          icon={<Trash2 className="size-3.5" />}
-          onClick={() => openDialog('confirmDelete', { ids })}
-        >
-          Excluir
-        </Button>
-        <Button
-          size="sm"
-          icon={<Download className="size-3.5" />}
-          onClick={() => openDialog('export', true)}
-        >
-          Exportar selecionados
-        </Button>
-        <Button
-          size="sm"
-          icon={<CopyPlus className="size-3.5" />}
-          onClick={() => openDialog('copyToLayer', true)}
-        >
-          Copiar para nova camada
-        </Button>
-      </div>
+      <SelectionActions ids={ids} />
 
       <div>
         {/* "Por coluna + coluna…": agrupa pela combinação (ex.: tipo_lampada + potencia → "ME 70"). */}

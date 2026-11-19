@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import {
   ArrowUpDown,
@@ -12,15 +12,18 @@ import {
   Search,
   Trash2,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { queryKeys, useSourceSchema } from '@/hooks/useSourceData';
-import { api, qs } from '@/lib/api';
+import { api, errorMessage, qs } from '@/lib/api';
 import { pointsService } from '@/services/points';
 import { useAppStore } from '@/stores/appStore';
+import type { ColumnMeta } from '@/types';
 import { fmtValue, isUrl } from '@/utils/format';
 import { applyOrder, moveItem } from '@/utils/list';
+import { fromInputValue, toInputValue, ValueInput } from '../forms/ValueInput';
 import { Button } from '../ui/Button';
 import { ErrorState, SkeletonList } from '../ui/States';
+import { toast } from '../ui/Toaster';
 import { CoordinateGrid } from './CoordinateGrid';
 
 interface AuditItem {
@@ -63,6 +66,118 @@ function AuditHistory({ sourceId, id }: { sourceId: string; id: string }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * Valor de um atributo editável direto no painel: ao passar o mouse aparece o lápis; Enter (ou sair
+ * do campo) grava no banco — a API registra na Tabela de Alterações, como o formulário —, Esc cancela.
+ */
+function InlineValue({
+  sourceId,
+  id,
+  col,
+  value,
+}: {
+  sourceId: string;
+  id: string;
+  col: ColumnMeta;
+  value: unknown;
+}) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const done = useRef(false);
+
+  const save = useMutation({
+    mutationFn: (v: unknown) => pointsService.update(sourceId, id, { [col.name]: v }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.points(sourceId) });
+      qc.invalidateQueries({ queryKey: ['changes'] });
+      qc.invalidateQueries({ queryKey: ['points', sourceId, 'audit', id] });
+      toast.success(`${col.name} atualizado.`);
+      setEditing(false);
+    },
+    onError: (err) => {
+      toast.error(errorMessage(err));
+      done.current = false;
+    },
+  });
+
+  const start = () => {
+    done.current = false;
+    setText(toInputValue(col, value));
+    setError(null);
+    setEditing(true);
+  };
+  const cancel = () => {
+    done.current = true;
+    setEditing(false);
+  };
+  const commit = () => {
+    if (done.current || save.isPending) return;
+    if (text === toInputValue(col, value)) {
+      cancel();
+      return;
+    }
+    const parsed = fromInputValue(col, text);
+    if (parsed.error) {
+      setError(parsed.error);
+      return;
+    }
+    done.current = true;
+    save.mutate(parsed.value);
+  };
+
+  if (editing) {
+    return (
+      <div
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') cancel();
+          else if (e.key === 'Enter' && !(e.target instanceof HTMLTextAreaElement)) {
+            e.preventDefault();
+            commit();
+          }
+        }}
+        onBlur={(e) => {
+          // Só ao sair do conjunto (o select de booleano também dispara blur ao abrir a lista).
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) commit();
+        }}
+      >
+        <ValueInput
+          col={col}
+          value={text}
+          onChange={(v) => {
+            setText(v);
+            setError(null);
+          }}
+          disabled={save.isPending}
+          autoFocus
+        />
+        {error && <p className="mt-0.5 text-[11px] text-red-600">{error}</p>}
+      </div>
+    );
+  }
+  return (
+    <span className="inline-flex max-w-full items-start gap-1">
+      {isUrl(value) ? (
+        <a href={String(value)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-700 hover:underline">
+          abrir link <ExternalLink className="size-3" />
+        </a>
+      ) : (
+        <span className="break-words">{fmtValue(value)}</span>
+      )}
+      <button
+        type="button"
+        onClick={start}
+        title={`Editar ${col.name}`}
+        aria-label={`Editar ${col.name}`}
+        className="shrink-0 rounded p-0.5 text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-slate-100 hover:text-slate-700 focus:opacity-100"
+      >
+        <Pencil className="size-3" />
+      </button>
+    </span>
   );
 }
 
@@ -209,13 +324,16 @@ export function RecordDetails({ sourceId, id }: { sourceId: string; id: string }
                 </div>
               );
             }
+            const col = schema.data?.columns.find((c) => c.name === name);
             return (
-              <div key={name} className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-2 py-1.5 text-xs">
+              <div key={name} className="group grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-2 py-1.5 text-xs">
                 <dt className="truncate text-slate-500" title={name}>
                   {name}
                 </dt>
                 <dd className="break-words text-slate-800">
-                  {isUrl(v) ? (
+                  {col && !col.readOnly ? (
+                    <InlineValue sourceId={sourceId} id={id} col={col} value={v} />
+                  ) : isUrl(v) ? (
                     <a href={v} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-700 hover:underline">
                       abrir link <ExternalLink className="size-3" />
                     </a>
